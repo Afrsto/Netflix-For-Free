@@ -1,4 +1,3 @@
-# bot.py
 import os
 import json
 import random
@@ -11,18 +10,19 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+# Note: Ensure netflix_checker.py is in the same directory
 from netflix_checker import check_cookie_file
 
 # ------------------------------
 # Configuration
 # ------------------------------
-ALLOWED_GUILD_ID = 1494152777381711945   # Only this server can use the bot
+ALLOWED_GUILD_ID = 1494152777381711945   
 
 COOKIES_FOLDER = Path("cookies")
 SCRIPT_TIMEOUT = 30
 CONFIG_FILE = Path("config.json")
 CLEANUP_DELAY_SECONDS = 120
-USER_LOG_FILE = Path("users.txt")        # Log file for user interactions
+USER_DATA_FILE = Path("users.txt")
 
 DISCORD_BOT_TOKEN = os.environ.get("DISCORD_TOKEN")
 if not DISCORD_BOT_TOKEN:
@@ -34,26 +34,24 @@ logging.basicConfig(
 )
 log = logging.getLogger("NetflixBot")
 
-# Asyncio lock for thread‑safe file writing
-user_log_lock = asyncio.Lock()
-
 # ------------------------------
-# User log function
+# User Data Logger
 # ------------------------------
-async def log_user_usage(user: discord.User, success: bool, details: str, cookie_file: str = ""):
-    """Append a line to users.txt with timestamp, user info, and action details."""
-    timestamp = datetime.utcnow().isoformat()
-    success_flag = "1" if success else "0"
-    # Escape any pipe characters in details or cookie_file to avoid breaking the format
-    details_escaped = details.replace("|", "\\|")
-    cookie_escaped = cookie_file.replace("|", "\\|")
-    log_line = f"{timestamp}|{user.id}|{user.name}|{success_flag}|{details_escaped}|{cookie_escaped}\n"
-    async with user_log_lock:
-        try:
-            with open(USER_LOG_FILE, "a", encoding="utf-8") as f:
-                f.write(log_line)
-        except Exception as e:
-            log.error(f"Failed to write to user log: {e}")
+def log_user_activity(user: discord.User | discord.Member, condition: str):
+    """Records user interaction details into users.txt."""
+    USER_DATA_FILE.touch(exist_ok=True)
+    
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    log_entry = (
+        f"[{timestamp}] ID: {user.id} | "
+        f"Username: {user.name} | "
+        f"Display Name: {user.display_name} | "
+        f"Date and time: {timestamp} | "
+        f"Condition: {condition}\n"
+    )
+    
+    with open(USER_DATA_FILE, "a", encoding="utf-8") as f:
+        f.write(log_entry)
 
 # ------------------------------
 # Translations
@@ -109,7 +107,6 @@ TRANSLATIONS = {
     }
 }
 
-# Helper to detect locale automatically for basic errors
 def get_user_lang(interaction: discord.Interaction) -> str:
     locale = str(interaction.locale)
     return "ar" if locale.startswith("ar") else "en"
@@ -156,9 +153,6 @@ def is_allowed_channel(interaction: discord.Interaction) -> bool:
         return False
     return interaction.channel_id == config.allowed_channel_id
 
-# ------------------------------
-# Global interaction check (guild restriction)
-# ------------------------------
 async def global_interaction_check(interaction: discord.Interaction) -> bool:
     if interaction.guild is None or interaction.guild.id != ALLOWED_GUILD_ID:
         lang = get_user_lang(interaction)
@@ -227,7 +221,6 @@ class ConfirmView(discord.ui.View):
         self.original_interaction = original_interaction
         self.language = language
         
-        # Dynamic localized buttons
         self.yes_btn = discord.ui.Button(label=TRANSLATIONS[language]["yes_label"], style=discord.ButtonStyle.green)
         self.yes_btn.callback = self.yes_callback
         
@@ -253,26 +246,24 @@ class ConfirmView(discord.ui.View):
         if interaction.user.id != self.original_user.id:
             await interaction.response.send_message(TRANSLATIONS[self.language]["not_for_you"], ephemeral=True)
             return
-        
-        # Log cancellation
-        await log_user_usage(interaction.user, success=False, details="cancelled", cookie_file="")
+            
+        log_user_activity(interaction.user, "User cancelled")
         await interaction.response.edit_message(content=TRANSLATIONS[self.language]["cancelled"], view=None)
         self.stop()
 
     async def generate_link(self, interaction: discord.Interaction):
         lang = self.language
         t = TRANSLATIONS[lang]
-        chosen_file = None
 
         if not COOKIES_FOLDER.exists():
+            log_user_activity(interaction.user, "Error: Folder missing")
             await interaction.edit_original_response(content=t["no_cookies_folder"])
-            await log_user_usage(interaction.user, success=False, details="cookies folder missing", cookie_file="")
             return
 
         txt_files = list(COOKIES_FOLDER.glob("*.txt"))
         if not txt_files:
+            log_user_activity(interaction.user, "Error: No cookies")
             await interaction.edit_original_response(content=t["no_cookie_files"])
-            await log_user_usage(interaction.user, success=False, details="no cookie files found", cookie_file="")
             return
 
         chosen_file = random.choice(txt_files)
@@ -284,16 +275,17 @@ class ConfirmView(discord.ui.View):
                 timeout=SCRIPT_TIMEOUT
             )
         except asyncio.TimeoutError:
+            log_user_activity(interaction.user, "Error: Timeout")
             await interaction.edit_original_response(content=t["timeout"])
-            await log_user_usage(interaction.user, success=False, details="timeout", cookie_file=str(chosen_file))
             return
         except Exception as e:
+            log_user_activity(interaction.user, f"Error: {str(e)}")
             log.error(f"Checker error: {e}")
             await interaction.edit_original_response(content=t["unexpected_error"])
-            await log_user_usage(interaction.user, success=False, details=f"checker exception: {e}", cookie_file=str(chosen_file))
             return
 
         if result:
+            log_user_activity(interaction.user, "Success: Link Generated")
             embed = discord.Embed(
                 title=t["success_title"],
                 description=t["success_desc"].format(link=result),
@@ -326,13 +318,9 @@ class ConfirmView(discord.ui.View):
                 followup_message=tv_message,
                 delay_seconds=CLEANUP_DELAY_SECONDS
             ))
-
-            # Log successful link generation
-            await log_user_usage(interaction.user, success=True, details="link generated", cookie_file=str(chosen_file))
-            log.info(f"Link sent to {interaction.user} – cleanup in {CLEANUP_DELAY_SECONDS}s")
         else:
+            log_user_activity(interaction.user, "Error: Invalid Cookie")
             await interaction.edit_original_response(content=t["cookie_invalid"])
-            await log_user_usage(interaction.user, success=False, details="cookie invalid/expired", cookie_file=str(chosen_file))
 
     async def on_timeout(self):
         for child in self.children:
@@ -360,19 +348,19 @@ async def cleanup_messages(
     if command_message:
         try:
             await command_message.delete()
-        except Exception as e:
+        except:
             pass
 
     if original_response:
         try:
             await original_response.delete()
-        except Exception as e:
+        except:
             pass
 
     if followup_message:
         try:
             await followup_message.delete()
-        except Exception as e:
+        except:
             pass
 
 # ------------------------------
@@ -393,7 +381,6 @@ async def set_channel(interaction: discord.Interaction, channel: discord.TextCha
     success_msg = f"✅ Bot will now **only** respond in {channel.mention}." if lang == "en" else f"✅ البوت سيعمل الآن **فقط** في {channel.mention}."
     await interaction.response.send_message(success_msg, ephemeral=True)
 
-    # Bilingual Setup Embed
     embed = discord.Embed(
         title="🎬 Netflix Link Generator | مولد روابط نتفليكس",
         description=f"**English:**\n{TRANSLATIONS['en']['setup_desc']}\n\n**العربية:**\n{TRANSLATIONS['ar']['setup_desc']}",
@@ -404,9 +391,6 @@ async def set_channel(interaction: discord.Interaction, channel: discord.TextCha
     try:
         setup_msg = await channel.send(embed=embed)
         await setup_msg.pin()
-        log.info(f"Pinned setup message in {channel.name} (ID: {channel.id})")
-    except discord.Forbidden:
-        log.warning(f"Missing permissions to send/pin message in {channel.name}")
     except Exception as e:
         log.error(f"Failed to send setup message: {e}")
 
@@ -429,9 +413,10 @@ async def create(interaction: discord.Interaction):
             await interaction.response.send_message(msg, ephemeral=True)
         return
 
+    # Trigger language prompt
     view = LanguageSelectView(interaction)
     await interaction.response.send_message(
-        TRANSLATIONS["en"]["lang_prompt"], # The prompt itself is bilingual
+        TRANSLATIONS["en"]["lang_prompt"],
         view=view,
         ephemeral=True
     )
@@ -446,14 +431,11 @@ async def on_ready():
 
     guild = discord.Object(id=ALLOWED_GUILD_ID)
     try:
-        synced = await bot.tree.sync(guild=guild)
-        log.info(f"Synced {len(synced)} slash commands to guild {ALLOWED_GUILD_ID}")
+        await bot.tree.sync(guild=guild)
+        log.info(f"Synced slash commands to guild {ALLOWED_GUILD_ID}")
     except Exception as e:
         log.error(f"Failed to sync commands: {e}")
 
-# ------------------------------
-# Run the bot
-# ------------------------------
 if __name__ == "__main__":
     COOKIES_FOLDER.mkdir(exist_ok=True)
     bot.run(DISCORD_BOT_TOKEN)
