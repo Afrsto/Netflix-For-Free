@@ -24,6 +24,13 @@ DISCORD_BOT_TOKEN = os.environ.get("DISCORD_TOKEN")
 if not DISCORD_BOT_TOKEN:
     raise ValueError("Missing DISCORD_TOKEN environment variable")
 
+GUILD_ID = os.getenv("GUILD_ID")
+if GUILD_ID:
+    guild = discord.Object(id=int(GUILD_ID))
+    bot.tree.sync(guild=guild)
+else:
+    bot.tree.sync()
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
