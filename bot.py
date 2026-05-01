@@ -23,9 +23,9 @@ CONFIG_FILE = Path("config.json")          # stores the designated channel ID
 # ------------------------------
 # Read token from environment variable
 # ------------------------------
-DISCORD_BOT_TOKEN = os.environ.get("DISCORD_BOT_TOKEN")
+DISCORD_BOT_TOKEN = os.environ.get("DISCORD_TOKEN")
 if not DISCORD_BOT_TOKEN:
-    raise ValueError("Missing DISCORD_BOT_TOKEN environment variable")
+    raise ValueError("Missing DISCORD_TOKEN environment variable")
 
 # ------------------------------
 # Logging setup
