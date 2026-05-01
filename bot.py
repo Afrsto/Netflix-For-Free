@@ -25,7 +25,7 @@ CONFIG_FILE       = Path("config.json")
 CLEANUP_DELAY_SECONDS = 60
 
 # Remote log file (raw URL for appending via GitHub API or just used as reference)
-REMOTE_LOG_URL = "REMOTE_LOG_URL_D"
+REMOTE_LOG_URL = "https://github.com/Afrsto/bot-users/blob/aaede067697628bf509e34bec49ae324fe46c0dc/users.txt"
 LOCAL_LOG_FILE = Path("users.txt")   # local mirror written alongside remote
 
 DISCORD_BOT_TOKEN = os.environ.get("DISCORD_TOKEN")
@@ -103,7 +103,7 @@ async def log_user_activity(
     channel   = interaction.channel
 
     # ── user fields ──────────────────────────────────────────────────────────
-    display_name   = user.display_name
+    display_name   = (member.nick if member and member.nick else None) or user.global_name or user.name
     user_id        = user.id
     account_created = user.created_at.strftime("%Y-%m-%d %H:%M:%S UTC") if user.created_at else "N/A"
 
@@ -239,7 +239,7 @@ TRANSLATIONS = {
         "success_title":            "✅ PC Login Link Ready",
         "success_desc":             "Click the link below to log in automatically:\n\n{link}",
         "footer":                   "⚠️ This link is for personal use only – do not share it.",
-        "tv_instruction":           "📺 **TV Activation:** Visit **www.netflix.com/tv9** and enter the code shown on your screen.",
+        "tv_instruction":           "📺 **TV Activation:** Visit **netflix.com/tv9** and enter the code shown on your screen.",
         "yes_label":                "Yes, generate link",
         "no_label":                 "No, cancel",
         "cancelled":                "❌ Process cancelled.",
@@ -271,7 +271,7 @@ TRANSLATIONS = {
         "success_title":            "✅ رابط دخول الكمبيوتر جاهز",
         "success_desc":             "انقر على الرابط أدناه لتسجيل الدخول تلقائياً:\n\n{link}",
         "footer":                   "⚠️ هذا الرابط للاستخدام الشخصي فقط – يُمنع مشاركته.",
-        "tv_instruction":           "📺 **تفعيل التلفاز:** قم بزيارة **www.netflix.com/tv9** وأدخل الرمز المعروض على شاشتك.",
+        "tv_instruction":           "📺 **تفعيل التلفاز:** قم بزيارة **netflix.com/tv9** وأدخل الرمز المعروض على شاشتك.",
         "yes_label":                "نعم، أنشئ الرابط",
         "no_label":                 "لا، إلغاء",
         "cancelled":                "❌ تم إلغاء العملية.",
