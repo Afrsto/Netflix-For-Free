@@ -1,4 +1,5 @@
 # bot.py
+import os
 import random
 import asyncio
 import logging
@@ -17,10 +18,13 @@ COOKIES_FOLDER = Path("cookies")
 SCRIPT_TIMEOUT = 30
 
 # ------------------------------
-# Bot token – set your real token here (no .env needed)
+# Read token from environment variable
 # ------------------------------
-DISCORD_BOT_TOKEN = "MTQ5OTcyMDQ1NzE5NTM1NjIwMA.G7QZoT.-lBx817-x_ieRv3H4-yL1nHA8aBBe2iTIyhg4k"   # <-- YOUR REAL TOKEN
+DISCORD_BOT_TOKEN = os.environ.get("DISCORD_BOT_TOKEN")
+if not DISCORD_BOT_TOKEN:
+    raise ValueError("Missing DISCORD_BOT_TOKEN environment variable")
 
+# ... rest of the script (unchanged) ...
 # ------------------------------
 # Logging setup
 # ------------------------------
