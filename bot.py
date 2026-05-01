@@ -35,7 +35,7 @@ log = logging.getLogger("NetflixBot")
 # ------------------------------
 TRANSLATIONS = {
     "en": {
-        "lang_prompt": "🌐 **Please select your language / الرجاء اختيار لغتك:**",
+        "lang_prompt": "🌐 **Please select language / الرجاء اختيار اللغة:**",
         "lang_selected": "✅ Language selected: English",
         "confirm_prompt": "**Do you want to generate a Netflix login link?**\nThis process will use one random cookie file.",
         "progress": "⏳ **Generating your Netflix link…**",
@@ -57,7 +57,7 @@ TRANSLATIONS = {
         "wrong_channel_with_config": "❌ This command can only be used in {channel}.",
     },
     "ar": {
-        "lang_prompt": "🌐 **الرجاء اختيار لغتك / Please select your language:**",
+        "lang_prompt": "🌐 **الرجاء اختيار اللغة / Please select language:**",
         "lang_selected": "✅ تم اختيار اللغة: العربية",
         "confirm_prompt": "**هل تريد إنشاء رابط دخول نتفليكس؟**\nستستخدم هذه العملية ملف كعكات عشوائي واحد.",
         "progress": "⏳ **جاري إنشاء رابط نتفليكس…**",
