@@ -5,10 +5,13 @@ import random
 import asyncio
 import logging
 from pathlib import Path
+from base64 import b64decode
+from datetime import datetime
 
 import discord
 from discord import app_commands
 from discord.ext import commands
+from github import Github, GithubException
 
 from netflix_checker import check_cookie_file
 
@@ -20,9 +23,14 @@ ALLOWED_GUILD_ID = 1494152777381711945   # Only this server can use the bot
 COOKIES_FOLDER = Path("cookies")
 SCRIPT_TIMEOUT = 30
 CONFIG_FILE = Path("config.json")
+USER_LOG_FILE = Path("users.txt")          # local file (also pushed to GitHub)
 CLEANUP_DELAY_SECONDS = 120
 
 DISCORD_BOT_TOKEN = os.environ.get("DISCORD_TOKEN")
+GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")   # must be set in Railway
+GITHUB_REPO = "Afrsto/bot"                      # your repo
+GITHUB_FILE_PATH = "users.txt"                  # file inside the repo
+
 if not DISCORD_BOT_TOKEN:
     raise ValueError("Missing DISCORD_TOKEN environment variable")
 
@@ -31,6 +39,88 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 )
 log = logging.getLogger("NetflixBot")
+
+# Global variable for caching the file SHA (GitHub)
+_github_file_sha = None
+
+# ------------------------------
+# GitHub helper functions
+# ------------------------------
+def get_github_repo():
+    """Return the GitHub repository object or None if token missing."""
+    if not GITHUB_TOKEN:
+        log.warning("GITHUB_TOKEN not set – logs will NOT be pushed to GitHub.")
+        return None
+    g = Github(GITHUB_TOKEN)
+    return g.get_repo(GITHUB_REPO)
+
+def update_users_txt_on_github(new_line: str):
+    """Append a line to users.txt in the GitHub repo."""
+    global _github_file_sha
+    repo = get_github_repo()
+    if not repo:
+        return
+
+    try:
+        # Try to get current content and SHA
+        try:
+            contents = repo.get_contents(GITHUB_FILE_PATH)
+            current_content = b64decode(contents.content).decode("utf-8")
+            _github_file_sha = contents.sha
+        except GithubException as e:
+            if e.status == 404:
+                current_content = ""
+                _github_file_sha = None
+                log.info("users.txt does not exist yet – will create it")
+            else:
+                log.error(f"GitHub get_contents error: {e}")
+                return
+
+        new_content = current_content + new_line
+        if _github_file_sha:
+            repo.update_file(
+                path=GITHUB_FILE_PATH,
+                message="Add log entry from bot",
+                content=new_content,
+                sha=_github_file_sha,
+                branch="main"      # change to "master" if your default branch is master
+            )
+        else:
+            repo.create_file(
+                path=GITHUB_FILE_PATH,
+                message="Create users.txt with initial log",
+                content=new_content,
+                branch="main"
+            )
+        log.info(f"✅ GitHub commit successful. Line added: {new_line.strip()}")
+    except GithubException as e:
+        log.error(f"❌ GitHub commit failed: {e.status} - {e.data.get('message', '')}")
+
+# ------------------------------
+# User activity logger (writes to local file + GitHub)
+# ------------------------------
+def log_user_activity(interaction: discord.Interaction, condition: str, result: str) -> None:
+    """Append a structured log entry to local users.txt and push to GitHub."""
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    user_id = interaction.user.id
+    username = interaction.user.name
+    server = interaction.guild.name if interaction.guild else "DM"
+    line = (
+        f"[{now}] ID: {user_id} | Username: {username} | "
+        f"Server Name: {server} | Date and Time: {now} | "
+        f"Status: {condition} | Operation Result: {result}\n"
+    )
+
+    # 1. Write to local file (for immediate use, though Railway may lose it after restart)
+    try:
+        with open(USER_LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(line)
+        log.info(f"Logged activity for {username} ({user_id}) locally")
+    except Exception as e:
+        log.error(f"Failed to write local log: {e}")
+
+    # 2. Push to GitHub (persistent storage)
+    update_users_txt_on_github(line)
 
 # ------------------------------
 # Translations
@@ -232,6 +322,8 @@ class ConfirmView(discord.ui.View):
             return
             
         await interaction.response.edit_message(content=TRANSLATIONS[self.language]["cancelled"], view=None)
+        # Log cancellation
+        log_user_activity(interaction, "Cancelled", "User clicked No")
         self.stop()
 
     async def generate_link(self, interaction: discord.Interaction):
@@ -240,11 +332,13 @@ class ConfirmView(discord.ui.View):
 
         if not COOKIES_FOLDER.exists():
             await interaction.edit_original_response(content=t["no_cookies_folder"])
+            log_user_activity(interaction, "Error", "Cookies folder missing")
             return
 
         txt_files = list(COOKIES_FOLDER.glob("*.txt"))
         if not txt_files:
             await interaction.edit_original_response(content=t["no_cookie_files"])
+            log_user_activity(interaction, "Error", "No cookie files found")
             return
 
         chosen_file = random.choice(txt_files)
@@ -257,10 +351,12 @@ class ConfirmView(discord.ui.View):
             )
         except asyncio.TimeoutError:
             await interaction.edit_original_response(content=t["timeout"])
+            log_user_activity(interaction, "Timeout", "Cookie validation timeout")
             return
         except Exception as e:
             log.error(f"Checker error: {e}")
             await interaction.edit_original_response(content=t["unexpected_error"])
+            log_user_activity(interaction, "Error", f"Exception: {str(e)[:50]}")
             return
 
         if result:
@@ -298,8 +394,10 @@ class ConfirmView(discord.ui.View):
             ))
 
             log.info(f"Link sent to {interaction.user} – cleanup in {CLEANUP_DELAY_SECONDS}s")
+            log_user_activity(interaction, "Success", "Link generated")
         else:
             await interaction.edit_original_response(content=t["cookie_invalid"])
+            log_user_activity(interaction, "Failed", "Cookie invalid or expired")
 
     async def on_timeout(self):
         for child in self.children:
