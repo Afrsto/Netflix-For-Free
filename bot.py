@@ -20,16 +20,10 @@ SCRIPT_TIMEOUT = 30
 CONFIG_FILE = Path("config.json")
 CLEANUP_DELAY_SECONDS = 120
 
-# ------------------------------
-# Read token from environment variable
-# ------------------------------
 DISCORD_BOT_TOKEN = os.environ.get("DISCORD_TOKEN")
 if not DISCORD_BOT_TOKEN:
     raise ValueError("Missing DISCORD_TOKEN environment variable")
 
-# ------------------------------
-# Logging setup
-# ------------------------------
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
@@ -37,11 +31,11 @@ logging.basicConfig(
 log = logging.getLogger("NetflixBot")
 
 # ------------------------------
-# Translations for English and Arabic
+# Translations
 # ------------------------------
 TRANSLATIONS = {
     "en": {
-        "lang_prompt": "🌐 Please select your language:",
+        "lang_prompt": "🌐 **Please select your language / الرجاء اختيار لغتك:**",
         "lang_selected": "✅ Language selected: English",
         "confirm_prompt": "**Do you want to generate a Netflix login link?**\nThis process will use one random cookie file.",
         "progress": "⏳ **Generating your Netflix link…**",
@@ -63,7 +57,7 @@ TRANSLATIONS = {
         "wrong_channel_with_config": "❌ This command can only be used in {channel}.",
     },
     "ar": {
-        "lang_prompt": "🌐 الرجاء اختيار لغتك:",
+        "lang_prompt": "🌐 **الرجاء اختيار لغتك / Please select your language:**",
         "lang_selected": "✅ تم اختيار اللغة: العربية",
         "confirm_prompt": "**هل تريد إنشاء رابط دخول نتفليكس؟**\nستستخدم هذه العملية ملف كعكات عشوائي واحد.",
         "progress": "⏳ **جاري إنشاء رابط نتفليكس…**",
@@ -87,7 +81,7 @@ TRANSLATIONS = {
 }
 
 # ------------------------------
-# Configuration manager (channel restriction)
+# Config manager
 # ------------------------------
 class Config:
     def __init__(self):
@@ -152,12 +146,12 @@ class LanguageSelectView(discord.ui.View):
         # Disable buttons and update original message
         for child in self.children:
             child.disabled = True
-        await interaction.response.edit_original_response(
+        await interaction.response.edit_message(
             content=TRANSLATIONS[lang]["lang_selected"],
             view=self
         )
 
-        # Now show the confirmation view in the chosen language
+        # Show confirmation view in chosen language
         confirm_view = ConfirmView(self.original_interaction.user, self.original_interaction, lang)
         await interaction.followup.send(
             TRANSLATIONS[lang]["confirm_prompt"],
@@ -178,7 +172,7 @@ class LanguageSelectView(discord.ui.View):
             pass
 
 # ------------------------------
-# Confirmation View (Yes / No) with language support
+# Confirmation View (Yes / No)
 # ------------------------------
 class ConfirmView(discord.ui.View):
     def __init__(self, original_user: discord.User | discord.Member, original_interaction: discord.Interaction, language: str):
@@ -186,31 +180,25 @@ class ConfirmView(discord.ui.View):
         self.original_user = original_user
         self.original_interaction = original_interaction
         self.language = language
-        self.value = None  # True = Yes, False = No
-        self.tv_message = None  # Will hold the followup TV message
+        self.value = None
+        self.tv_message = None
 
     @discord.ui.button(label="Yes", style=discord.ButtonStyle.green)
     async def yes_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # Update button label based on language
-        button.label = TRANSLATIONS[self.language]["yes_label"]
         if interaction.user.id != self.original_user.id:
             await interaction.response.send_message(TRANSLATIONS[self.language]["not_for_you"], ephemeral=True)
             return
         self.value = True
-        # Defer to allow time for processing
-        await interaction.response.defer(ephemeral=True)
-        # Edit the original confirmation message to show progress
-        await interaction.edit_original_response(
+        # Immediately edit the message to show progress
+        await interaction.response.edit_message(
             content=TRANSLATIONS[self.language]["progress"],
             view=None
         )
-        # Proceed to generate link
         await self.generate_link(interaction)
         self.stop()
 
     @discord.ui.button(label="No", style=discord.ButtonStyle.red)
     async def no_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        button.label = TRANSLATIONS[self.language]["no_label"]
         if interaction.user.id != self.original_user.id:
             await interaction.response.send_message(TRANSLATIONS[self.language]["not_for_you"], ephemeral=True)
             return
@@ -219,11 +207,9 @@ class ConfirmView(discord.ui.View):
         self.stop()
 
     async def generate_link(self, interaction: discord.Interaction):
-        """Actual cookie checking and link sending logic"""
         lang = self.language
         t = TRANSLATIONS[lang]
 
-        # Check cookies folder
         if not COOKIES_FOLDER.exists():
             await interaction.edit_original_response(content=t["no_cookies_folder"])
             return
@@ -250,7 +236,6 @@ class ConfirmView(discord.ui.View):
             return
 
         if result:
-            # Send success embed
             embed = discord.Embed(
                 title=t["success_title"],
                 description=t["success_desc"].format(link=result),
@@ -259,13 +244,13 @@ class ConfirmView(discord.ui.View):
             embed.set_footer(text=t["footer"])
             await interaction.edit_original_response(content=None, embed=embed)
 
-            # Send TV instruction as a followup (ephemeral so only user sees it)
+            # TV instruction – ephemeral, only the user sees it
             self.tv_message = await interaction.followup.send(
                 t["tv_instruction"],
                 ephemeral=True
             )
 
-            # Schedule cleanup
+            # Cleanup
             channel = interaction.channel
             command_message = None
             try:
@@ -286,7 +271,7 @@ class ConfirmView(discord.ui.View):
                 delay_seconds=CLEANUP_DELAY_SECONDS
             ))
 
-            log.info(f"Link sent to {interaction.user} – cleanup scheduled in {CLEANUP_DELAY_SECONDS}s")
+            log.info(f"Link sent to {interaction.user} – cleanup in {CLEANUP_DELAY_SECONDS}s")
         else:
             await interaction.edit_original_response(content=t["cookie_invalid"])
 
@@ -334,7 +319,7 @@ async def cleanup_messages(
             log.error(f"Failed to delete followup message: {e}")
 
 # ------------------------------
-# /channel command (admin only)
+# /channel command
 # ------------------------------
 @bot.tree.command(name="channel", description="Set the text channel where the bot will work (Admin only)")
 @app_commands.default_permissions(administrator=True)
@@ -371,11 +356,10 @@ async def set_channel(interaction: discord.Interaction, channel: discord.TextCha
         log.error(f"Failed to send setup message: {e}")
 
 # ------------------------------
-# /create command (now only shows language selection)
+# /create command
 # ------------------------------
 @bot.tree.command(name="create", description="Generate a Netflix PC login link from a random cookie file")
 async def create(interaction: discord.Interaction):
-    # Channel restriction check
     if not is_allowed_channel(interaction):
         if config.allowed_channel_id is None:
             await interaction.response.send_message(
@@ -388,7 +372,6 @@ async def create(interaction: discord.Interaction):
             await interaction.response.send_message(msg, ephemeral=True)
         return
 
-    # Send language selection view
     view = LanguageSelectView(interaction)
     await interaction.response.send_message(
         TRANSLATIONS["en"]["lang_prompt"],
