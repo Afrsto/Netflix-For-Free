@@ -81,20 +81,10 @@ def is_allowed_channel(interaction: discord.Interaction) -> bool:
     return interaction.channel_id == config.allowed_channel_id
 
 # ------------------------------
-# Slash command: /channel (admin only)
+# Background task to send & pin setup message (avoids interaction timeout)
 # ------------------------------
-@bot.tree.command(name="channel", description="Set the text channel where the bot will work (Admin only)")
-@app_commands.default_permissions(administrator=True)
-async def set_channel(interaction: discord.Interaction, channel: discord.TextChannel):
-    """Select a text channel – all bot commands will be restricted to this channel."""
-    if not interaction.user.guild_permissions.administrator:
-        await interaction.response.send_message("❌ You need administrator permissions.", ephemeral=True)
-        return
-
-    config.set_allowed_channel(channel.id)
-    await interaction.response.send_message(f"✅ Bot will now **only** respond in {channel.mention}.", ephemeral=True)
-
-    # Send setup message in the chosen channel and pin it
+async def send_setup_message(channel: discord.TextChannel):
+    """Send the setup embed and pin it. Called after the interaction response."""
     embed = discord.Embed(
         title="🎬 Netflix Link Generator",
         description=(
@@ -119,6 +109,26 @@ async def set_channel(interaction: discord.Interaction, channel: discord.TextCha
         log.error(f"Failed to send setup message: {e}")
 
 # ------------------------------
+# Slash command: /channel (admin only)
+# ------------------------------
+@bot.tree.command(name="channel", description="Set the text channel where the bot will work (Admin only)")
+@app_commands.default_permissions(administrator=True)
+async def set_channel(interaction: discord.Interaction, channel: discord.TextChannel):
+    """Select a text channel – all bot commands will be restricted to this channel."""
+    # First, respond immediately to avoid timeout
+    await interaction.response.send_message(
+        f"✅ Bot will now **only** respond in {channel.mention}.\n"
+        "Setting up the channel... (this may take a few seconds)",
+        ephemeral=True
+    )
+
+    # Save the channel ID
+    config.set_allowed_channel(channel.id)
+
+    # Start background task to send and pin the setup message
+    asyncio.create_task(send_setup_message(channel))
+
+# ------------------------------
 # Confirmation View (Yes / No)
 # ------------------------------
 class ConfirmView(discord.ui.View):
@@ -135,7 +145,7 @@ class ConfirmView(discord.ui.View):
             return
         self.value = True
         self.stop()
-        await interaction.response.defer(ephemeral=True)  # acknowledge, we'll handle later
+        await interaction.response.defer(ephemeral=True)  # acknowledge
 
     @discord.ui.button(label="No", style=discord.ButtonStyle.red)
     async def no_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -149,7 +159,6 @@ class ConfirmView(discord.ui.View):
     async def on_timeout(self):
         for item in self.children:
             item.disabled = True
-        # Try to edit the original message to show timeout
         try:
             await self.original_interaction.edit_original_response(content="⏰ Timeout – no response received.", view=None)
         except:
@@ -168,26 +177,27 @@ async def cleanup_messages(
     """Wait `delay_seconds` then delete all provided messages."""
     await asyncio.sleep(delay_seconds)
 
-    # Delete the user's command message if it exists and bot has manage_messages
     if command_message:
         try:
             await command_message.delete()
-        except discord.Forbidden:
-            log.warning("Missing manage_messages permission to delete user command message.")
+        except (discord.NotFound, discord.Forbidden):
+            pass  # Already deleted or no permission
         except Exception as e:
             log.error(f"Failed to delete command message: {e}")
 
-    # Delete the bot's ephemeral original response (the embed)
     if original_response:
         try:
             await original_response.delete()
+        except (discord.NotFound, discord.Forbidden):
+            pass
         except Exception as e:
             log.error(f"Failed to delete original response: {e}")
 
-    # Delete the followup TV message
     if followup_message:
         try:
             await followup_message.delete()
+        except (discord.NotFound, discord.Forbidden):
+            pass
         except Exception as e:
             log.error(f"Failed to delete followup message: {e}")
 
@@ -215,7 +225,6 @@ async def create(interaction: discord.Interaction):
     # Wait for button interaction
     timeout = await view.wait()
     if timeout or view.value is None:
-        # Already handled by on_timeout
         return
 
     if not view.value:  # User clicked No
@@ -270,11 +279,9 @@ async def create(interaction: discord.Interaction):
         )
 
         # Store messages for cleanup
-        # Get the user's original command message (the slash command)
         channel = interaction.channel
         command_message = None
         try:
-            # Fetch the last message before the bot's response (the user's command)
             async for msg in channel.history(limit=5):
                 if msg.author == interaction.user and msg.interaction and msg.interaction.id == interaction.id:
                     command_message = msg
@@ -282,7 +289,6 @@ async def create(interaction: discord.Interaction):
         except Exception as e:
             log.error(f"Could not fetch command message: {e}")
 
-        # WebhookMessage of the original response (ephemeral embed)
         original_response = await interaction.original_response()
 
         # Start cleanup after 3 minutes
@@ -291,7 +297,7 @@ async def create(interaction: discord.Interaction):
             command_message=command_message,
             original_response=original_response,
             followup_message=tv_msg,
-            delay_seconds=180  # 3 minutes
+            delay_seconds=180
         ))
 
         log.info(f"Link sent to {interaction.user} – cleanup scheduled")
