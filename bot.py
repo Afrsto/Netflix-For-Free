@@ -15,6 +15,8 @@ from netflix_checker import check_cookie_file
 # ------------------------------
 # Configuration
 # ------------------------------
+ALLOWED_GUILD_ID = 1494152777381711945   # Only this server can use the bot
+
 COOKIES_FOLDER = Path("cookies")
 SCRIPT_TIMEOUT = 30
 CONFIG_FILE = Path("config.json")
@@ -55,6 +57,7 @@ TRANSLATIONS = {
         "timeout_msg": "⏰ Timeout – no response received.",
         "wrong_channel_no_config": "⚠️ No channel has been configured. Ask an admin to use `/channel`.",
         "wrong_channel_with_config": "❌ This command can only be used in {channel}.",
+        "wrong_guild": "❌ This bot is restricted to a specific server.",
     },
     "ar": {
         "lang_prompt": "🌐 **الرجاء اختيار اللغة / Please select language:**",
@@ -77,6 +80,7 @@ TRANSLATIONS = {
         "timeout_msg": "⏰ انتهى الوقت – لم يتم استلام رد.",
         "wrong_channel_no_config": "⚠️ لم يتم تكوين أي قناة. اطلب من المدير استخدام `/channel`.",
         "wrong_channel_with_config": "❌ لا يمكن استخدام هذا الأمر إلا في {channel}.",
+        "wrong_guild": "❌ هذا البوت مقيد بسيرفر معين.",
     }
 }
 
@@ -121,6 +125,22 @@ def is_allowed_channel(interaction: discord.Interaction) -> bool:
     if config.allowed_channel_id is None:
         return False
     return interaction.channel_id == config.allowed_channel_id
+
+# ------------------------------
+# Global interaction check (guild restriction)
+# ------------------------------
+async def global_interaction_check(interaction: discord.Interaction) -> bool:
+    # Allow only the specific guild
+    if interaction.guild is None or interaction.guild.id != ALLOWED_GUILD_ID:
+        # Send an ephemeral error message if possible
+        lang = "en"  # Fallback language
+        # Try to detect user's language? Not needed, just use English
+        if interaction.response.is_done():
+            await interaction.followup.send(TRANSLATIONS[lang]["wrong_guild"], ephemeral=True)
+        else:
+            await interaction.response.send_message(TRANSLATIONS[lang]["wrong_guild"], ephemeral=True)
+        return False
+    return True
 
 # ------------------------------
 # Language selection view
@@ -385,11 +405,21 @@ async def create(interaction: discord.Interaction):
 @bot.event
 async def on_ready():
     log.info(f"Logged in as {bot.user} (ID: {bot.user.id})")
+    # Set up the global interaction check on the tree
+    bot.tree.interaction_check = global_interaction_check
+
+    # Sync commands only to the allowed guild
+    guild = discord.Object(id=ALLOWED_GUILD_ID)
     try:
-        synced = await bot.tree.sync()
-        log.info(f"Synced {len(synced)} slash commands")
+        synced = await bot.tree.sync(guild=guild)
+        log.info(f"Synced {len(synced)} slash commands to guild {ALLOWED_GUILD_ID}")
     except Exception as e:
         log.error(f"Failed to sync commands: {e}")
+
+    # Optional: Warn if bot is in other guilds
+    for guild in bot.guilds:
+        if guild.id != ALLOWED_GUILD_ID:
+            log.warning(f"Bot is present in an unauthorized guild: {guild.name} (ID: {guild.id})")
 
 # ------------------------------
 # Run the bot
