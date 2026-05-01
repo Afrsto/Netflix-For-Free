@@ -19,6 +19,9 @@ COOKIES_FOLDER = Path("cookies")
 SCRIPT_TIMEOUT = 30
 CONFIG_FILE = Path("config.json")
 
+# MODIFIED: Cleanup delay reduced from 180 to 120 seconds (2 minutes)
+CLEANUP_DELAY_SECONDS = 120
+
 # ------------------------------
 # Read token from environment variable
 # ------------------------------
@@ -81,10 +84,20 @@ def is_allowed_channel(interaction: discord.Interaction) -> bool:
     return interaction.channel_id == config.allowed_channel_id
 
 # ------------------------------
-# Background task to send & pin setup message (avoids interaction timeout)
+# Slash command: /channel (admin only)
 # ------------------------------
-async def send_setup_message(channel: discord.TextChannel):
-    """Send the setup embed and pin it. Called after the interaction response."""
+@bot.tree.command(name="channel", description="Set the text channel where the bot will work (Admin only)")
+@app_commands.default_permissions(administrator=True)
+async def set_channel(interaction: discord.Interaction, channel: discord.TextChannel):
+    """Select a text channel – all bot commands will be restricted to this channel."""
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("❌ You need administrator permissions.", ephemeral=True)
+        return
+
+    config.set_allowed_channel(channel.id)
+    await interaction.response.send_message(f"✅ Bot will now **only** respond in {channel.mention}.", ephemeral=True)
+
+    # Send setup message in the chosen channel and pin it
     embed = discord.Embed(
         title="🎬 Netflix Link Generator",
         description=(
@@ -95,7 +108,7 @@ async def send_setup_message(channel: discord.TextChannel):
             "3. Wait a few seconds – the bot will give you a personal login link.\n"
             "4. Use the link to log in on your PC browser.\n\n"
             "**Note:** The link is one-time use and expires shortly.\n"
-            "The bot will automatically delete all messages after 3 minutes for privacy."
+            "The bot will automatically delete all messages after 2 minutes for privacy."
         ),
         color=discord.Color.blue()
     )
@@ -107,26 +120,6 @@ async def send_setup_message(channel: discord.TextChannel):
         log.warning(f"Missing permissions to send/pin message in {channel.name}")
     except Exception as e:
         log.error(f"Failed to send setup message: {e}")
-
-# ------------------------------
-# Slash command: /channel (admin only)
-# ------------------------------
-@bot.tree.command(name="channel", description="Set the text channel where the bot will work (Admin only)")
-@app_commands.default_permissions(administrator=True)
-async def set_channel(interaction: discord.Interaction, channel: discord.TextChannel):
-    """Select a text channel – all bot commands will be restricted to this channel."""
-    # First, respond immediately to avoid timeout
-    await interaction.response.send_message(
-        f"✅ Bot will now **only** respond in {channel.mention}.\n"
-        "Setting up the channel... (this may take a few seconds)",
-        ephemeral=True
-    )
-
-    # Save the channel ID
-    config.set_allowed_channel(channel.id)
-
-    # Start background task to send and pin the setup message
-    asyncio.create_task(send_setup_message(channel))
 
 # ------------------------------
 # Confirmation View (Yes / No)
@@ -145,7 +138,7 @@ class ConfirmView(discord.ui.View):
             return
         self.value = True
         self.stop()
-        await interaction.response.defer(ephemeral=True)  # acknowledge
+        await interaction.response.defer(ephemeral=True)
 
     @discord.ui.button(label="No", style=discord.ButtonStyle.red)
     async def no_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -172,32 +165,31 @@ async def cleanup_messages(
     command_message: discord.Message,
     original_response: discord.WebhookMessage,
     followup_message: discord.Message,
-    delay_seconds: int = 180
+    delay_seconds: int = CLEANUP_DELAY_SECONDS
 ):
     """Wait `delay_seconds` then delete all provided messages."""
     await asyncio.sleep(delay_seconds)
 
+    # Delete the user's command message if it exists and bot has manage_messages
     if command_message:
         try:
             await command_message.delete()
-        except (discord.NotFound, discord.Forbidden):
-            pass  # Already deleted or no permission
+        except discord.Forbidden:
+            log.warning("Missing manage_messages permission to delete user command message.")
         except Exception as e:
             log.error(f"Failed to delete command message: {e}")
 
+    # Delete the bot's ephemeral original response (the embed)
     if original_response:
         try:
             await original_response.delete()
-        except (discord.NotFound, discord.Forbidden):
-            pass
         except Exception as e:
             log.error(f"Failed to delete original response: {e}")
 
+    # Delete the followup TV message
     if followup_message:
         try:
             await followup_message.delete()
-        except (discord.NotFound, discord.Forbidden):
-            pass
         except Exception as e:
             log.error(f"Failed to delete followup message: {e}")
 
@@ -228,10 +220,9 @@ async def create(interaction: discord.Interaction):
         return
 
     if not view.value:  # User clicked No
-        return  # Cancelled message already sent
+        return
 
     # User clicked Yes – proceed
-    # Edit the original ephemeral message to show progress
     await interaction.edit_original_response(content="⏳ **Generating your Netflix link…**", view=None)
 
     # Check cookies folder
@@ -270,11 +261,9 @@ async def create(interaction: discord.Interaction):
         embed.set_footer(text="This link is personal – do not share it.")
         await interaction.edit_original_response(content=None, embed=embed)
 
-        # Additional TV instruction message (non‑ephemeral, visible in channel)
+        # MODIFIED: TV instruction message matches requirement exactly
         tv_msg = await interaction.followup.send(
-            "📺 **You can also run the account on the TV through this link:**\n"
-            "https://netflix.com/tv9\n\n"
-            "Open that link on your TV browser and enter the code shown there.",
+            "You can also run the account on the TV through this link netflix.com/tv9 and enter the code for TV.",
             ephemeral=False
         )
 
@@ -291,16 +280,16 @@ async def create(interaction: discord.Interaction):
 
         original_response = await interaction.original_response()
 
-        # Start cleanup after 3 minutes
+        # MODIFIED: Cleanup now uses 120 seconds (2 minutes)
         asyncio.create_task(cleanup_messages(
             channel=channel,
             command_message=command_message,
             original_response=original_response,
             followup_message=tv_msg,
-            delay_seconds=180
+            delay_seconds=CLEANUP_DELAY_SECONDS
         ))
 
-        log.info(f"Link sent to {interaction.user} – cleanup scheduled")
+        log.info(f"Link sent to {interaction.user} – cleanup scheduled in {CLEANUP_DELAY_SECONDS}s")
     else:
         await interaction.edit_original_response(content="❌ The selected cookie file is invalid or expired.")
 
