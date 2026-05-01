@@ -18,7 +18,7 @@ from netflix_checker import check_cookie_file
 # ------------------------------
 COOKIES_FOLDER = Path("cookies")
 SCRIPT_TIMEOUT = 30
-CONFIG_FILE = Path("config.json")          # stores the designated channel ID
+CONFIG_FILE = Path("config.json")
 
 # ------------------------------
 # Read token from environment variable
@@ -68,16 +68,25 @@ intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # ------------------------------
-# Helper: send & pin explanation message
+# Helper: send & pin explanation message (with permission checks)
 # ------------------------------
 async def send_pinned_explanation(channel: discord.TextChannel):
-    """Send a pinned message explaining how to use the bot, replacing any previous pinned bot message."""
+    """Send a pinned message explaining how to use the bot."""
+    # Check permissions first
+    me = channel.guild.me
+    if not me.permissions_in(channel).manage_messages:
+        log.warning(f"Cannot pin explanation in {channel.name}: missing manage_messages")
+        return
+
     # Unpin and delete any existing pinned messages sent by this bot
     pinned_messages = await channel.pins()
     for msg in pinned_messages:
         if msg.author == bot.user:
-            await msg.unpin()
-            await msg.delete()
+            try:
+                await msg.unpin()
+                await msg.delete()
+            except:
+                pass
 
     embed = discord.Embed(
         title="📺 Netflix Bot – How to use",
@@ -99,9 +108,10 @@ async def send_pinned_explanation(channel: discord.TextChannel):
 # Button view with Yes / No
 # ------------------------------
 class ConfirmView(discord.ui.View):
-    def __init__(self, original_user: discord.User | discord.Member):
+    def __init__(self, original_user: discord.User | discord.Member, original_message: discord.Message):
         super().__init__(timeout=60)
         self.original_user = original_user
+        self.original_message = original_message   # the ephemeral command response containing the buttons
 
     @discord.ui.button(label="Yes", style=discord.ButtonStyle.green)
     async def yes_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -149,12 +159,12 @@ class ConfirmView(discord.ui.View):
 
             # Send TV instruction as a followup (ephemeral)
             tv_msg = await interaction.followup.send(
-                "📺 You can also run the account on the TV through this link: `netflix.com/tv9` and enter the code for TV.",
+                "📺 You can also run the account on the TV through this link: `netflix.com/tv8` and enter the code for TV.",
                 ephemeral=True
             )
 
-            # Schedule auto-deletion of both the embed and the TV instruction after 3 minutes
-            asyncio.create_task(auto_delete_messages(interaction, tv_msg))
+            # Schedule auto‑deletion of both the embed (original command response) and the TV instruction after 3 minutes
+            asyncio.create_task(auto_delete_messages(self.original_message, tv_msg))
 
             log.info(f"Link sent to {interaction.user}")
         else:
@@ -170,21 +180,20 @@ class ConfirmView(discord.ui.View):
     async def on_timeout(self):
         for item in self.children:
             item.disabled = True
-        # Attempt to edit the original message to show timeout
         try:
-            await self.message.edit(view=self)
+            await self.original_message.edit(view=self)
         except:
             pass
 
-async def auto_delete_messages(interaction: discord.Interaction, followup_msg: discord.WebhookMessage):
-    """Delete the main response (embed) and the followup TV instruction after 180 seconds."""
+async def auto_delete_messages(cmd_response: discord.Message, followup: discord.WebhookMessage):
+    """Delete the original command response (the embed) and the followup TV instruction after 180 seconds."""
     await asyncio.sleep(180)
     try:
-        await interaction.delete_original_response()
+        await cmd_response.delete()
     except Exception as e:
-        log.debug(f"Could not delete original response: {e}")
+        log.debug(f"Could not delete command response: {e}")
     try:
-        await followup_msg.delete()
+        await followup.delete()
     except Exception as e:
         log.debug(f"Could not delete followup message: {e}")
 
@@ -207,8 +216,14 @@ async def set_channel(interaction: discord.Interaction, channel: Optional[discor
     set_designated_channel_id(channel.id)
     await interaction.response.send_message(f"✅ Designated channel set to {channel.mention}.", ephemeral=True)
 
-    # Send and pin the explanation message in the new channel
-    await send_pinned_explanation(channel)
+    # Send and pin the explanation message in the new channel (requires manage_messages)
+    try:
+        await send_pinned_explanation(channel)
+    except discord.Forbidden:
+        await interaction.followup.send(
+            f"⚠️ I need `Manage Messages` permission to pin instructions in {channel.mention}. Please grant it and run `/channel` again.",
+            ephemeral=True
+        )
 
 # ------------------------------
 # Slash command: /create
@@ -229,10 +244,11 @@ async def create(interaction: discord.Interaction):
         description="Do you want to generate a PC login link from a random cookie file?",
         color=discord.Color.blue()
     )
-    view = ConfirmView(original_user=interaction.user)
-    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
-    # Store the message so the view can disable itself on timeout (optional)
-    view.message = await interaction.original_response()
+    # Send the ephemeral message first, then create the view with a reference to that message
+    await interaction.response.send_message(embed=embed, view=None, ephemeral=True)
+    cmd_response = await interaction.original_response()
+    view = ConfirmView(original_user=interaction.user, original_message=cmd_response)
+    await cmd_response.edit(view=view)
 
 # ------------------------------
 # Bot events
@@ -246,13 +262,11 @@ async def on_ready():
     except Exception as e:
         log.error(f"Failed to sync commands: {e}")
 
-    # Optional: Re‑send pinned explanation if the designated channel still exists?
-    # Not required by the prompt, but adds robustness.
+    # Optionally re‑create pinned explanation if needed
     designated_id = get_designated_channel_id()
     if designated_id:
         channel = bot.get_channel(designated_id)
         if channel and isinstance(channel, discord.TextChannel):
-            # Check if the channel already has a pinned message from the bot
             pins = await channel.pins()
             has_bot_pin = any(msg.author == bot.user for msg in pins)
             if not has_bot_pin:
@@ -264,262 +278,4 @@ async def on_ready():
 # ------------------------------
 if __name__ == "__main__":
     COOKIES_FOLDER.mkdir(exist_ok=True)
-    bot.run(DISCORD_BOT_TOKEN)# bot.py
-
-import os
-
-import random
-
-import asyncio
-
-import logging
-
-from pathlib import Path
-
-
-
-import discord
-
-from discord import app_commands
-
-from discord.ext import commands
-
-
-
-from netflix_checker import check_cookie_file
-
-
-
-# ------------------------------
-
-# Configuration
-
-# ------------------------------
-
-COOKIES_FOLDER = Path("cookies")
-
-SCRIPT_TIMEOUT = 30
-
-
-
-# ------------------------------
-
-# Read token from environment variable
-
-# ------------------------------
-
-DISCORD_BOT_TOKEN = os.environ.get("DISCORD_BOT_TOKEN")
-
-if not DISCORD_BOT_TOKEN:
-
-    raise ValueError("Missing DISCORD_BOT_TOKEN environment variable")
-
-
-
-# ... rest of the script (unchanged) ...
-
-# ------------------------------
-
-# Logging setup
-
-# ------------------------------
-
-logging.basicConfig(
-
-    level=logging.INFO,
-
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
-
-)
-
-log = logging.getLogger("NetflixBot")
-
-
-
-# ------------------------------
-
-# Bot setup
-
-# ------------------------------
-
-intents = discord.Intents.default()
-
-bot = commands.Bot(command_prefix="!", intents=intents)
-
-
-
-# ------------------------------
-
-# Button view
-
-# ------------------------------
-
-class CreateLinkView(discord.ui.View):
-
-    def __init__(self, original_user: discord.User | discord.Member):
-
-        super().__init__(timeout=60)
-
-        self.original_user = original_user
-
-
-
-    @discord.ui.button(label="Create", style=discord.ButtonStyle.green)
-
-    async def create_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-
-        if interaction.user.id != self.original_user.id:
-
-            await interaction.response.send_message("❌ This button is not for you.", ephemeral=True)
-
-            return
-
-
-
-        await interaction.response.send_message("⏳ **Generating your Netflix link…**", ephemeral=True)
-
-
-
-        if not COOKIES_FOLDER.exists():
-
-            await interaction.edit_original_response(content="❌ Cookies folder not found. Contact the bot admin.")
-
-            return
-
-
-
-        txt_files = list(COOKIES_FOLDER.glob("*.txt"))
-
-        if not txt_files:
-
-            await interaction.edit_original_response(content="❌ No cookie files found in the folder.")
-
-            return
-
-
-
-        chosen_file = random.choice(txt_files)
-
-        log.info(f"User {interaction.user} triggered check for file: {chosen_file}")
-
-
-
-        try:
-
-            result = await asyncio.wait_for(
-
-                asyncio.to_thread(check_cookie_file, str(chosen_file)),
-
-                timeout=SCRIPT_TIMEOUT
-
-            )
-
-        except asyncio.TimeoutError:
-
-            await interaction.edit_original_response(content="⌛ The check took too long. Please try again later.")
-
-            return
-
-        except Exception as e:
-
-            log.error(f"Checker error: {e}")
-
-            await interaction.edit_original_response(content="⚠️ An unexpected error occurred while processing the file.")
-
-            return
-
-
-
-        if result:
-
-            embed = discord.Embed(
-
-                title="✅ PC Login Link Ready",
-
-                description=f"Click the link below to log in automatically:\n\n{result}",
-
-                color=discord.Color.green()
-
-            )
-
-            embed.set_footer(text="This link is personal – do not share it.")
-
-            await interaction.edit_original_response(content=None, embed=embed)
-
-            log.info(f"Link sent to {interaction.user}")
-
-        else:
-
-            await interaction.edit_original_response(content="❌ The selected cookie file is invalid or expired.")
-
-
-
-    async def on_timeout(self):
-
-        for item in self.children:
-
-            item.disabled = True
-
-
-
-# ------------------------------
-
-# Slash command
-
-# ------------------------------
-
-@bot.tree.command(name="create", description="Generate a Netflix PC login link from a random cookie file")
-
-async def create(interaction: discord.Interaction):
-
-    embed = discord.Embed(
-
-        title="Netflix Link Generator",
-
-        description="Do you want to create a link?",
-
-        color=discord.Color.blue()
-
-    )
-
-    view = CreateLinkView(original_user=interaction.user)
-
-    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
-
-
-
-# ------------------------------
-
-# Bot events
-
-# ------------------------------
-
-@bot.event
-
-async def on_ready():
-
-    log.info(f"Logged in as {bot.user} (ID: {bot.user.id})")
-
-    try:
-
-        synced = await bot.tree.sync()
-
-        log.info(f"Synced {len(synced)} slash commands")
-
-    except Exception as e:
-
-        log.error(f"Failed to sync commands: {e}")
-
-
-
-# ------------------------------
-
-# Run the bot
-
-# ------------------------------
-
-if __name__ == "__main__":
-
-    COOKIES_FOLDER.mkdir(exist_ok=True)
-
     bot.run(DISCORD_BOT_TOKEN)
