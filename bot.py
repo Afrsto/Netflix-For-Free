@@ -20,10 +20,9 @@ SCRIPT_TIMEOUT = 30
 # ------------------------------
 # Read token from environment variable
 # ------------------------------
-DISCORD_BOT_TOKEN = os.environ.get("DISCORD_BOT_TOKEN")
+DISCORD_BOT_TOKEN = os.environ.get("DISCORD_TOKEN")
 if not DISCORD_BOT_TOKEN:
-    raise ValueError("Missing DISCORD_BOT_TOKEN environment variable")
-
+    raise ValueError("Missing DISCORD_TOKEN environment variable")
 # ... rest of the script (unchanged) ...
 # ------------------------------
 # Logging setup
