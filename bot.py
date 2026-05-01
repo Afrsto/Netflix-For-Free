@@ -81,7 +81,7 @@ TRANSLATIONS = {
 }
 
 # ------------------------------
-# Config manager
+# Config manager (channel restriction)
 # ------------------------------
 class Config:
     def __init__(self):
@@ -189,7 +189,6 @@ class ConfirmView(discord.ui.View):
             await interaction.response.send_message(TRANSLATIONS[self.language]["not_for_you"], ephemeral=True)
             return
         self.value = True
-        # Immediately edit the message to show progress
         await interaction.response.edit_message(
             content=TRANSLATIONS[self.language]["progress"],
             view=None
@@ -319,7 +318,7 @@ async def cleanup_messages(
             log.error(f"Failed to delete followup message: {e}")
 
 # ------------------------------
-# /channel command
+# /channel command (admin only)
 # ------------------------------
 @bot.tree.command(name="channel", description="Set the text channel where the bot will work (Admin only)")
 @app_commands.default_permissions(administrator=True)
@@ -356,10 +355,11 @@ async def set_channel(interaction: discord.Interaction, channel: discord.TextCha
         log.error(f"Failed to send setup message: {e}")
 
 # ------------------------------
-# /create command
+# /create command (global, no guild restriction)
 # ------------------------------
 @bot.tree.command(name="create", description="Generate a Netflix PC login link from a random cookie file")
 async def create(interaction: discord.Interaction):
+    # Channel restriction check (optional, set via /channel)
     if not is_allowed_channel(interaction):
         if config.allowed_channel_id is None:
             await interaction.response.send_message(
@@ -386,8 +386,9 @@ async def create(interaction: discord.Interaction):
 async def on_ready():
     log.info(f"Logged in as {bot.user} (ID: {bot.user.id})")
     try:
+        # Global sync – commands will appear in every server where the bot is present
         synced = await bot.tree.sync()
-        log.info(f"Synced {len(synced)} slash commands")
+        log.info(f"Synced {len(synced)} global slash commands")
     except Exception as e:
         log.error(f"Failed to sync commands: {e}")
 
