@@ -15,7 +15,7 @@ from discord import app_commands
 from discord.ext import commands
 from github import Github, GithubException
 
-# NEW: PostgreSQL support for persistent config on Railway
+
 try:
     import asyncpg
     HAS_ASYNCPG = True
