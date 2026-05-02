@@ -25,12 +25,15 @@ COOKIES_FOLDER         = Path("cookies")
 SCRIPT_TIMEOUT         = 30
 CONFIG_FILE            = Path("config.json")
 USER_LOG_FILE          = Path("users.txt")     # local fallback (also pushed to GitHub)
-CLEANUP_DELAY_SECONDS  = 120
+CLEANUP_DELAY_SECONDS  = 60
 
 DISCORD_BOT_TOKEN = os.environ.get("DISCORD_TOKEN")
 GITHUB_TOKEN      = os.environ.get("GITHUB_TOKEN")
 REMOTE_LOG_URL    = os.environ.get("REMOTE_LOG_URL")
-GUILD_ID          = os.environ.get("GUILD_ID")   # GitHub URL to the log file
+GUILD_ID          = os.environ.get("GUILD_ID")
+ALLOWED_GUILD_ID  = int(GUILD_ID) if GUILD_ID and GUILD_ID.isdigit() else None
+if not ALLOWED_GUILD_ID:
+    raise ValueError("❌ Missing or invalid GUILD_ID environment variable")
 
 if not DISCORD_BOT_TOKEN:
     raise ValueError("❌ Missing DISCORD_TOKEN environment variable")
@@ -282,6 +285,7 @@ async def log_user_activity(
     condition: str,
     result: str,
     used_txt_files: list[str] | None = None,
+    language: str | None = None,
 ) -> None:
     """Append a structured log entry locally and push to GitHub."""
     now_egypt = datetime.now(EGYPT_TZ).strftime("%Y-%m-%d %H:%M:%S")
@@ -327,6 +331,7 @@ async def log_user_activity(
     )
 
     txt_files_str = ", ".join(used_txt_files) if used_txt_files else "N/A"
+    lang_label    = {"ar": "Arabic 🇸🇦", "en": "English 🇬🇧"}.get(language, language) if language else "N/A"
 
     line = (
         f"[{now_egypt} EGY] "
@@ -337,6 +342,7 @@ async def log_user_activity(
         f"🏠 Server: {server_name} (ID: {server_id}) | "
         f"💬 Channel: #{channel_name} | "
         f"🎭 Roles: [{roles_str}] | "
+        f"🌐 Language: {lang_label} | "
         f"📄 Files Used: [{txt_files_str}] | "
         f"📊 Status: {condition} | "
         f"🔎 Result: {result}\n"
@@ -386,40 +392,42 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
             "1️⃣  Type `/create` in this channel.\n"
             "2️⃣  Select your preferred language.\n"
             "3️⃣  Confirm the generation.\n"
-            "4️⃣  Wait a few seconds for your personal link.\n\n"
-            "*⚠️ Note: Links are single-use. Messages auto-delete after 2 minutes for privacy.*"
+            "4️⃣  Wait a few seconds for your personal link.\n"
+            "5️⃣  To log in on TV, visit **www.netflix.com/tv9** and enter the code shown on your screen.\n\n"
+            "*⚠️ Note: Links are single-use. Messages auto-delete after 1 minute for privacy.*"
         ),
     },
     "ar": {
         "lang_prompt":            "🌐 **Please select your language:**\n🌐 **الرجاء اختيار اللغة:**",
-        "lang_selected":          "✅ تم اختيار اللغة: **العربية**",
-        "confirm_prompt":         "🎬 **هل تريد إنشاء رابط تسجيل دخول لـ نتفليكس؟**\n",
-        "progress":               "⏳ **جاري إنشاء الرابط الخاص بك… يرجى الانتظار.**",
-        "no_cookies_folder":      "❌ مجلد ملفات تعريف الارتباط غير موجود. يرجى الاتصال بالمسؤول.",
-        "no_cookie_files":        "❌ لا توجد حسابات متاحة حالياً في قاعدة البيانات. حاول لاحقاً.",
-        "timeout":                "⌛ استغرق التحقق وقتاً طويلاً. يرجى المحاولة مرة أخرى لاحقاً.",
-        "unexpected_error":       "⚠️ حدث خطأ غير متوقع أثناء معالجة الطلب.",
-        "cookie_invalid":         "❌ الحساب المختار غير صالح أو منتهي الصلاحية. حاول مجدداً.",
-        "success_title":          "✅ 🎬 رابط تسجيل الدخول إلى نتفليكس جاهز!",
-        "success_desc":           "🔗 انقر على الرابط أدناه لتسجيل الدخول تلقائياً:\n\n{link}",
-        "footer":                 "⚠️ هذا الرابط للاستخدام الشخصي فقط – يُمنع مشاركته.",
-        "tv_instruction":         " **تفعيل التلفاز:** قم بزيارة **www.netflix.com/tv9** وأدخل الرمز المعروض على شاشتك.",
+        "lang_selected":          "\u200f✅ تم اختيار اللغة: **العربية**",
+        "confirm_prompt":         "\u200f🎬 **هل تريد إنشاء رابط تسجيل دخول لـ نتفليكس؟**\n",
+        "progress":               "\u200f⏳ **جاري إنشاء الرابط الخاص بك… يرجى الانتظار.**",
+        "no_cookies_folder":      "\u200f❌ مجلد ملفات تعريف الارتباط غير موجود. يرجى الاتصال بالمسؤول.",
+        "no_cookie_files":        "\u200f❌ لا توجد حسابات متاحة حالياً في قاعدة البيانات. حاول لاحقاً.",
+        "timeout":                "\u200f⌛ استغرق التحقق وقتاً طويلاً. يرجى المحاولة مرة أخرى لاحقاً.",
+        "unexpected_error":       "\u200f⚠️ حدث خطأ غير متوقع أثناء معالجة الطلب.",
+        "cookie_invalid":         "\u200f❌ الحساب المختار غير صالح أو منتهي الصلاحية. حاول مجدداً.",
+        "success_title":          "\u200f✅ 🎬 رابط تسجيل الدخول إلى نتفليكس جاهز!",
+        "success_desc":           "\u200f🔗 انقر على الرابط أدناه لتسجيل الدخول تلقائياً:\n\n{link}",
+        "footer":                 "\u200f⚠️ هذا الرابط للاستخدام الشخصي فقط – يُمنع مشاركته.",
+        "tv_instruction":         "\u200f **تفعيل التلفاز:** قم بزيارة **www.netflix.com/tv9** وأدخل الرمز المعروض على شاشتك.",
         "yes_label":              "✅  نعم، أنشئ الرابط",
         "no_label":               "❌  لا، إلغاء",
-        "cancelled":              "🚫 تم إلغاء العملية.",
-        "not_for_you":            "🚫 لا يمكنك التفاعل مع هذه القائمة.",
-        "timeout_msg":            "⏰ انتهت مهلة الطلب بسبب عدم التفاعل.",
-        "wrong_channel_no_config": "⚠️ لم يتم إعداد القناة. يجب على المسؤول استخدام أمر `/channel` أولاً.",
-        "wrong_channel_with_config": "❌ لا يمكن استخدام هذا الأمر إلا في {channel}.",
-        "wrong_guild":            "❌ هذا البوت مخصص للعمل في سيرفر محدد فقط.",
+        "cancelled":              "\u200f🚫 تم إلغاء العملية.",
+        "not_for_you":            "\u200f🚫 لا يمكنك التفاعل مع هذه القائمة.",
+        "timeout_msg":            "\u200f⏰ انتهت مهلة الطلب بسبب عدم التفاعل.",
+        "wrong_channel_no_config": "\u200f⚠️ لم يتم إعداد القناة. يجب على المسؤول استخدام أمر `/channel` أولاً.",
+        "wrong_channel_with_config": "\u200f❌ لا يمكن استخدام هذا الأمر إلا في {channel}.",
+        "wrong_guild":            "\u200f❌ هذا البوت مخصص للعمل في سيرفر محدد فقط.",
         "setup_desc": (
             "مرحباً! 👋 استخدم أمر `/create` لإنشاء رابط تسجيل دخول لـ نتفليكس.\n\n"
             "**📋 طريقة الاستخدام:**\n"
             "1️⃣  اكتب `/create` في هذه القناة.\n"
             "2️⃣  اختر لغتك المفضلة.\n"
             "3️⃣  قم بتأكيد الإنشاء.\n"
-            "4️⃣  انتظر بضع ثوانٍ للحصول على رابطك الشخصي.\n\n"
-            "*⚠️ ملاحظة: الروابط للاستخدام مرة واحدة. يتم حذف الرسائل تلقائياً بعد دقيقتين للخصوصية.*"
+            "4️⃣  انتظر بضع ثوانٍ للحصول على رابطك الشخصي.\n"
+            "\u200f5️⃣  لتسجيل الدخول على التلفاز، قم بزيارة **www.netflix.com/tv9** وأدخل الرمز المعروض على شاشتك.\n\n"
+            "\u200f*⚠️ ملاحظة: الروابط للاستخدام مرة واحدة. يتم حذف الرسائل تلقائياً بعد دقيقة للخصوصية.*"
         ),
     },
 }
@@ -516,8 +524,17 @@ class LanguageSelectView(discord.ui.View):
             child.disabled = True
         await interaction.response.edit_message(content=TRANSLATIONS[lang]["lang_selected"], view=self)
 
+        # Capture the lang-selection message so it can be deleted later
+        lang_message = await interaction.original_response()
+
         confirm_view = ConfirmView(self.original_interaction.user, self.original_interaction, lang)
-        await interaction.followup.send(TRANSLATIONS[lang]["confirm_prompt"], view=confirm_view, ephemeral=True)
+        confirm_message = await interaction.followup.send(
+            TRANSLATIONS[lang]["confirm_prompt"], view=confirm_view, ephemeral=True
+        )
+
+        # Pass references into ConfirmView so generate_link can clean them up
+        confirm_view.lang_message    = lang_message
+        confirm_view.confirm_message = confirm_message
         self.stop()
 
     async def on_timeout(self) -> None:
@@ -538,6 +555,8 @@ class ConfirmView(discord.ui.View):
         self.original_user = original_user
         self.original_interaction = original_interaction
         self.language = language
+        self.lang_message: discord.Message | None = None
+        self.confirm_message: discord.Message | None = None
 
         yes_btn = discord.ui.Button(label=TRANSLATIONS[language]["yes_label"], style=discord.ButtonStyle.green, emoji="🎬")
         yes_btn.callback = self.yes_callback
@@ -563,7 +582,7 @@ class ConfirmView(discord.ui.View):
             return
 
         await interaction.response.edit_message(content=TRANSLATIONS[self.language]["cancelled"], view=None)
-        await log_user_activity(interaction, "Cancelled", "User clicked No")
+        await log_user_activity(interaction, "Cancelled", "User clicked No", language=self.language)
         self.stop()
 
     async def generate_link(self, interaction: discord.Interaction) -> None:
@@ -572,13 +591,13 @@ class ConfirmView(discord.ui.View):
 
         if not COOKIES_FOLDER.exists():
             await interaction.edit_original_response(content=t["no_cookies_folder"])
-            await log_user_activity(interaction, "Error", "Cookies folder missing")
+            await log_user_activity(interaction, "Error", "Cookies folder missing", language=self.language)
             return
 
         txt_files = list(COOKIES_FOLDER.glob("*.txt"))
         if not txt_files:
             await interaction.edit_original_response(content=t["no_cookie_files"])
-            await log_user_activity(interaction, "Error", "No cookie files found")
+            await log_user_activity(interaction, "Error", "No cookie files found", language=self.language)
             return
 
         chosen_file = pick_cookie_file(txt_files)
@@ -588,12 +607,12 @@ class ConfirmView(discord.ui.View):
             result = await asyncio.wait_for(asyncio.to_thread(check_cookie_file, str(chosen_file)), timeout=SCRIPT_TIMEOUT)
         except asyncio.TimeoutError:
             await interaction.edit_original_response(content=t["timeout"])
-            await log_user_activity(interaction, "Timeout", "Cookie validation timeout", used_txt_files=[chosen_file.name])
+            await log_user_activity(interaction, "Timeout", "Cookie validation timeout", used_txt_files=[chosen_file.name], language=self.language)
             return
         except Exception as e:
             log.error(f"❌ Checker error: {e}")
             await interaction.edit_original_response(content=t["unexpected_error"])
-            await log_user_activity(interaction, "Error", f"Exception: {str(e)[:80]}", used_txt_files=[chosen_file.name])
+            await log_user_activity(interaction, "Error", f"Exception: {str(e)[:80]}", used_txt_files=[chosen_file.name], language=self.language)
             return
 
         if result:
@@ -607,9 +626,6 @@ class ConfirmView(discord.ui.View):
                 timestamp=datetime.now(),
             )
             embed.set_thumbnail(url="https://upload.wikimedia.org/wikipedia/commons/0/08/Netflix_2015_logo.svg")
-            embed.add_field(name="👤 User", value=f"{user.mention} (`{user}`)", inline=True)
-            embed.add_field(name="🆔 User ID", value=str(user.id), inline=True)
-            embed.add_field(name="🗓️ Account Created", value=user.created_at.strftime("%Y-%m-%d"), inline=True)
             if member and member.joined_at:
                 embed.add_field(name="📅 Server Member Since", value=member.joined_at.strftime("%Y-%m-%d"), inline=True)
             if member:
@@ -637,14 +653,16 @@ class ConfirmView(discord.ui.View):
                 command_message=command_message,
                 original_response=original_response,
                 followup_message=tv_message,
+                lang_message=self.lang_message,
+                confirm_message=self.confirm_message,
                 delay_seconds=CLEANUP_DELAY_SECONDS,
             ))
 
             log.info(f"🔗 Link sent to {interaction.user} – cleanup in {CLEANUP_DELAY_SECONDS}s")
-            await log_user_activity(interaction, "✅ Success", "Link generated", used_txt_files=[chosen_file.name])
+            await log_user_activity(interaction, "✅ Success", "Link generated", used_txt_files=[chosen_file.name], language=self.language)
         else:
             await interaction.edit_original_response(content=t["cookie_invalid"])
-            await log_user_activity(interaction, "❌ Failed", "Cookie invalid or expired", used_txt_files=[chosen_file.name])
+            await log_user_activity(interaction, "❌ Failed", "Cookie invalid or expired", used_txt_files=[chosen_file.name], language=self.language)
 
     async def on_timeout(self) -> None:
         for child in self.children:
@@ -658,9 +676,17 @@ class ConfirmView(discord.ui.View):
 # ╔══════════════════════════════════════════════════════════════╗
 # ║                      CLEANUP TASK                           ║
 # ╚══════════════════════════════════════════════════════════════╝
-async def cleanup_messages(channel: discord.TextChannel, command_message: discord.Message | None, original_response: discord.WebhookMessage, followup_message: discord.Message | None, delay_seconds: int) -> None:
+async def cleanup_messages(
+    channel: discord.TextChannel,
+    command_message: discord.Message | None,
+    original_response: discord.WebhookMessage,
+    followup_message: discord.Message | None,
+    delay_seconds: int,
+    lang_message: discord.Message | None = None,
+    confirm_message: discord.Message | None = None,
+) -> None:
     await asyncio.sleep(delay_seconds)
-    for msg in (command_message, original_response, followup_message):
+    for msg in (command_message, original_response, followup_message, lang_message, confirm_message):
         if msg is not None:
             try:
                 await msg.delete()
