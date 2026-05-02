@@ -7,6 +7,7 @@ import logging
 from pathlib import Path
 from base64 import b64decode
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from urllib.parse import urlparse
 
 import discord
@@ -56,6 +57,123 @@ if REMOTE_LOG_URL:
         logging.warning("⚠️ Could not parse REMOTE_LOG_URL_D, GitHub logging disabled.")
 else:
     logging.warning("⚠️ REMOTE_LOG_URL_D not set, GitHub logging disabled.")
+
+# ────────────────────────────────────────────────────────────────
+# Locale → Country name + timezone mapping
+# ────────────────────────────────────────────────────────────────
+LOCALE_TO_COUNTRY: dict[str, str] = {
+    "ar": "Arab Region", "ar-AE": "UAE", "ar-BH": "Bahrain",
+    "ar-DZ": "Algeria", "ar-EG": "Egypt", "ar-IQ": "Iraq",
+    "ar-JO": "Jordan", "ar-KW": "Kuwait", "ar-LB": "Lebanon",
+    "ar-LY": "Libya", "ar-MA": "Morocco", "ar-OM": "Oman",
+    "ar-QA": "Qatar", "ar-SA": "Saudi Arabia", "ar-SD": "Sudan",
+    "ar-SY": "Syria", "ar-TN": "Tunisia", "ar-YE": "Yemen",
+    "en": "Unknown", "en-US": "USA", "en-GB": "UK",
+    "en-AU": "Australia", "en-CA": "Canada", "en-IN": "India",
+    "en-NZ": "New Zealand", "en-ZA": "South Africa",
+    "fr": "France", "fr-BE": "Belgium", "fr-CA": "Canada",
+    "fr-CH": "Switzerland", "fr-FR": "France",
+    "de": "Germany", "de-AT": "Austria", "de-CH": "Switzerland", "de-DE": "Germany",
+    "es": "Spain", "es-ES": "Spain", "es-MX": "Mexico", "es-AR": "Argentina",
+    "tr": "Turkey", "tr-TR": "Turkey",
+    "ru": "Russia", "ru-RU": "Russia",
+    "zh": "China", "zh-CN": "China", "zh-TW": "Taiwan",
+    "ja": "Japan", "ja-JP": "Japan",
+    "ko": "South Korea", "ko-KR": "South Korea",
+    "pt": "Portugal", "pt-BR": "Brazil", "pt-PT": "Portugal",
+    "it": "Italy", "it-IT": "Italy",
+    "nl": "Netherlands", "nl-NL": "Netherlands", "nl-BE": "Belgium",
+    "pl": "Poland", "pl-PL": "Poland",
+    "sv": "Sweden", "sv-SE": "Sweden",
+    "no": "Norway", "nb": "Norway", "nb-NO": "Norway",
+    "da": "Denmark", "da-DK": "Denmark",
+    "fi": "Finland", "fi-FI": "Finland",
+    "cs": "Czech Republic", "cs-CZ": "Czech Republic",
+    "ro": "Romania", "ro-RO": "Romania",
+    "hu": "Hungary", "hu-HU": "Hungary",
+    "el": "Greece", "el-GR": "Greece",
+    "he": "Israel", "he-IL": "Israel",
+    "fa": "Iran", "fa-IR": "Iran",
+    "hi": "India", "hi-IN": "India",
+    "id": "Indonesia", "id-ID": "Indonesia",
+    "ms": "Malaysia", "ms-MY": "Malaysia",
+    "th": "Thailand", "th-TH": "Thailand",
+    "vi": "Vietnam", "vi-VN": "Vietnam",
+    "uk": "Ukraine", "uk-UA": "Ukraine",
+}
+
+LOCALE_TO_TZ: dict[str, str] = {
+    "ar-AE": "Asia/Dubai",        "ar-BH": "Asia/Bahrain",
+    "ar-DZ": "Africa/Algiers",    "ar-EG": "Africa/Cairo",
+    "ar-IQ": "Asia/Baghdad",      "ar-JO": "Asia/Amman",
+    "ar-KW": "Asia/Kuwait",       "ar-LB": "Asia/Beirut",
+    "ar-LY": "Africa/Tripoli",    "ar-MA": "Africa/Casablanca",
+    "ar-OM": "Asia/Muscat",       "ar-QA": "Asia/Qatar",
+    "ar-SA": "Asia/Riyadh",       "ar-SD": "Africa/Khartoum",
+    "ar-SY": "Asia/Damascus",     "ar-TN": "Africa/Tunis",
+    "ar-YE": "Asia/Aden",
+    "en-US": "America/New_York",  "en-GB": "Europe/London",
+    "en-AU": "Australia/Sydney",  "en-CA": "America/Toronto",
+    "en-IN": "Asia/Kolkata",      "en-NZ": "Pacific/Auckland",
+    "en-ZA": "Africa/Johannesburg",
+    "fr-FR": "Europe/Paris",      "fr-BE": "Europe/Brussels",
+    "fr-CH": "Europe/Zurich",     "fr-CA": "America/Toronto",
+    "de-DE": "Europe/Berlin",     "de-AT": "Europe/Vienna",
+    "de-CH": "Europe/Zurich",
+    "es-ES": "Europe/Madrid",     "es-MX": "America/Mexico_City",
+    "es-AR": "America/Argentina/Buenos_Aires",
+    "tr-TR": "Europe/Istanbul",
+    "ru-RU": "Europe/Moscow",
+    "zh-CN": "Asia/Shanghai",     "zh-TW": "Asia/Taipei",
+    "ja-JP": "Asia/Tokyo",
+    "ko-KR": "Asia/Seoul",
+    "pt-BR": "America/Sao_Paulo", "pt-PT": "Europe/Lisbon",
+    "it-IT": "Europe/Rome",
+    "nl-NL": "Europe/Amsterdam",  "nl-BE": "Europe/Brussels",
+    "pl-PL": "Europe/Warsaw",
+    "sv-SE": "Europe/Stockholm",
+    "nb-NO": "Europe/Oslo",
+    "da-DK": "Europe/Copenhagen",
+    "fi-FI": "Europe/Helsinki",
+    "cs-CZ": "Europe/Prague",
+    "ro-RO": "Europe/Bucharest",
+    "hu-HU": "Europe/Budapest",
+    "el-GR": "Europe/Athens",
+    "he-IL": "Asia/Jerusalem",
+    "fa-IR": "Asia/Tehran",
+    "hi-IN": "Asia/Kolkata",
+    "id-ID": "Asia/Jakarta",
+    "ms-MY": "Asia/Kuala_Lumpur",
+    "th-TH": "Asia/Bangkok",
+    "vi-VN": "Asia/Ho_Chi_Minh",
+    "uk-UA": "Europe/Kiev",
+}
+
+EGYPT_TZ = ZoneInfo("Africa/Cairo")
+
+
+def get_locale_info(locale_str: str) -> tuple[str, str, str]:
+    """
+    Returns (country_name, local_time_str, tz_name) for the given Discord locale.
+    Falls back gracefully if locale is unknown.
+    """
+    locale = str(locale_str)
+    # Try full locale first, then language prefix
+    country = LOCALE_TO_COUNTRY.get(locale) or LOCALE_TO_COUNTRY.get(locale.split("-")[0], "Unknown")
+    tz_key  = LOCALE_TO_TZ.get(locale) or LOCALE_TO_TZ.get(locale.split("-")[0])
+    if tz_key:
+        try:
+            tz       = ZoneInfo(tz_key)
+            local_dt = datetime.now(tz)
+            local_time_str = local_dt.strftime("%Y-%m-%d %H:%M:%S")
+        except Exception:
+            local_time_str = "N/A"
+            tz_key = "Unknown"
+    else:
+        local_time_str = "N/A"
+        tz_key = "Unknown"
+    return country, local_time_str, tz_key
+
 
 logging.basicConfig(
     level=logging.INFO,
@@ -163,9 +281,10 @@ async def log_user_activity(
     interaction: discord.Interaction,
     condition: str,
     result: str,
+    used_txt_files: list[str] | None = None,
 ) -> None:
     """Append a structured log entry locally and push to GitHub."""
-    now       = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now_egypt = datetime.now(EGYPT_TZ).strftime("%Y-%m-%d %H:%M:%S")
     user      = interaction.user
     guild     = interaction.guild
 
@@ -174,19 +293,25 @@ async def log_user_activity(
     display_name  = user.display_name
     user_id       = user.id
     account_since = user.created_at.strftime("%Y-%m-%d")
-    server_name   = guild.name       if guild else "DM"
-    server_id     = guild.id         if guild else "N/A"
+    server_name   = guild.name if guild else "DM"
+    server_id     = guild.id   if guild else "N/A"
+
+    # ── Locale → country + local time ─────────────────────────────────
+    locale_str = str(interaction.locale) if interaction.locale else "en"
+    country_name, local_time, local_tz = get_locale_info(locale_str)
 
     # ── Fetch fresh member data to avoid cache issues ─────────────────
-    member_since = "N/A"
-    roles_str    = "N/A"
+    member_since        = "N/A"
+    login_date_server   = "N/A"   # date the account joined this server
+    roles_str           = "N/A"
 
     if guild:
         try:
             # Force fetch the member from Discord API (bypass cache)
             member = await guild.fetch_member(user.id)
             if member.joined_at:
-                member_since = member.joined_at.strftime("%Y-%m-%d")
+                member_since      = member.joined_at.strftime("%Y-%m-%d")
+                login_date_server = member.joined_at.strftime("%Y-%m-%d %H:%M:%S")
             # Get roles (skip @everyone)
             if member.roles:
                 roles_str = ", ".join(r.name for r in member.roles[1:]) or "None"
@@ -201,15 +326,20 @@ async def log_user_activity(
         else "N/A"
     )
 
+    txt_files_str = ", ".join(used_txt_files) if used_txt_files else "N/A"
+
     line = (
-        f"[{now}] "
+        f"[{now_egypt} EGY] "
         f"👤 User: {username} (Display: {display_name}) | "
         f"🆔 ID: {user_id} | "
+        f"🌍 Country: {country_name} | "
+        f"🕐 Local Time ({local_tz}): {local_time} | "
         f"🗓️  Account Created: {account_since} | "
+        f"📅 Joined Server: {login_date_server} | "
         f"🏠 Server: {server_name} (ID: {server_id}) | "
-        f"📅 Member Since: {member_since} | "
         f"💬 Channel: #{channel_name} | "
         f"🎭 Roles: [{roles_str}] | "
+        f"📄 Files Used: [{txt_files_str}] | "
         f"📊 Status: {condition} | "
         f"🔎 Result: {result}\n"
     )
@@ -460,12 +590,12 @@ class ConfirmView(discord.ui.View):
             result = await asyncio.wait_for(asyncio.to_thread(check_cookie_file, str(chosen_file)), timeout=SCRIPT_TIMEOUT)
         except asyncio.TimeoutError:
             await interaction.edit_original_response(content=t["timeout"])
-            await log_user_activity(interaction, "Timeout", "Cookie validation timeout")
+            await log_user_activity(interaction, "Timeout", "Cookie validation timeout", used_txt_files=[chosen_file.name])
             return
         except Exception as e:
             log.error(f"❌ Checker error: {e}")
             await interaction.edit_original_response(content=t["unexpected_error"])
-            await log_user_activity(interaction, "Error", f"Exception: {str(e)[:80]}")
+            await log_user_activity(interaction, "Error", f"Exception: {str(e)[:80]}", used_txt_files=[chosen_file.name])
             return
 
         if result:
@@ -513,10 +643,10 @@ class ConfirmView(discord.ui.View):
             ))
 
             log.info(f"🔗 Link sent to {interaction.user} – cleanup in {CLEANUP_DELAY_SECONDS}s")
-            await log_user_activity(interaction, "✅ Success", "Link generated")
+            await log_user_activity(interaction, "✅ Success", "Link generated", used_txt_files=[chosen_file.name])
         else:
             await interaction.edit_original_response(content=t["cookie_invalid"])
-            await log_user_activity(interaction, "❌ Failed", "Cookie invalid or expired")
+            await log_user_activity(interaction, "❌ Failed", "Cookie invalid or expired", used_txt_files=[chosen_file.name])
 
     async def on_timeout(self) -> None:
         for child in self.children:
