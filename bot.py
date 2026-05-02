@@ -24,20 +24,20 @@ SCRIPT_TIMEOUT    = 30
 CONFIG_FILE       = Path("config.json")
 CLEANUP_DELAY_SECONDS = 60
 
-# Remote log file (raw URL for appending via GitHub API or just used as reference)
-REMOTE_LOG_URL = "https://github.com/Afrsto/bot-users/blob/e70a706ebd52e3f7e980c5601157a3fcf38665dc/users.txt"
+# Remote log reference (can be overridden via environment variable)
+REMOTE_LOG_URL = os.environ.get("REMOTE_LOG_URL_D", "REMOTE_LOG_URL_D")
 LOCAL_LOG_FILE = Path("users.txt")   # local mirror written alongside remote
 
 DISCORD_BOT_TOKEN = os.environ.get("DISCORD_TOKEN")
 if not DISCORD_BOT_TOKEN:
     raise ValueError("Missing DISCORD_TOKEN environment variable")
 
-# Optional: GitHub PAT for writing to the repo (set GITHUB_TOKEN env var)
+# GitHub integration (optional)
 GITHUB_TOKEN      = os.environ.get("GITHUB_TOKEN", "")
 GITHUB_REPO_OWNER = "Afrsto"
 GITHUB_REPO_NAME  = "bot-users"
 GITHUB_FILE_PATH  = "users.txt"
-GITHUB_BRANCH     = "main"           # change if your default branch differs
+GITHUB_BRANCH     = "main"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -91,8 +91,8 @@ async def log_user_activity(
       1. LOCAL_LOG_FILE  (always)
       2. GitHub repo file via the Contents API (when GITHUB_TOKEN is set)
 
-    Log format:
-    [TIMESTAMP] User: (Display: NAME) | ID: USERID | Account Created: DATE |
+    Log format (updated):
+    [TIMESTAMP] User: | Username: DISPLAY_NAME | ID: USERID | Account Created: DATE |
                 Server: NAME (ID: GUILD_ID) | Member Since: DATE |
                 Channel: #NAME (ID: CHANNEL_ID) | Roles: ROLE1, ROLE2 |
                 Status: STATUS | Cookie File: FILE | Result: RESULT
@@ -133,10 +133,10 @@ async def log_user_activity(
 
     status = str(member.status).capitalize() if member else "Unknown"
 
-    # ── compose line ─────────────────────────────────────────────────────────
+    # ── compose line (updated format) ─────────────────────────────────────────
     line = (
         f"[{now}] "
-        f"User: (Display: {display_name}) | "
+        f"User: | Username: {display_name} | "
         f"ID: {user_id} | "
         f"Account Created: {account_created} | "
         f"Server: {guild_name} (ID: {guild_id}) | "
@@ -163,7 +163,6 @@ async def log_user_activity(
         asyncio.create_task(_push_log_to_github(line))
     else:
         log.debug("GITHUB_TOKEN not set – skipping remote log push.")
-
 
 async def _push_log_to_github(new_line: str) -> None:
     """
@@ -221,9 +220,8 @@ async def _push_log_to_github(new_line: str) -> None:
     except Exception as exc:
         log.error(f"GitHub log push error: {exc}")
 
-
 # ------------------------------
-# Translations
+# Translations (unchanged)
 # ------------------------------
 TRANSLATIONS = {
     "en": {
@@ -292,14 +290,12 @@ TRANSLATIONS = {
     },
 }
 
-
 def get_user_lang(interaction: discord.Interaction) -> str:
     locale = str(interaction.locale)
     return "ar" if locale.startswith("ar") else "en"
 
-
 # ------------------------------
-# Config manager
+# Config manager (unchanged)
 # ------------------------------
 class Config:
     def __init__(self):
@@ -326,7 +322,6 @@ class Config:
         self.allowed_channel_id = channel_id
         self.save()
 
-
 config = Config()
 
 # ------------------------------
@@ -334,15 +329,13 @@ config = Config()
 # ------------------------------
 intents = discord.Intents.default()
 intents.message_content = True
-intents.members          = True   # needed to fetch member status / join date / roles
+intents.members          = True
 bot = commands.Bot(command_prefix="!", intents=intents)
-
 
 def is_allowed_channel(interaction: discord.Interaction) -> bool:
     if config.allowed_channel_id is None:
         return False
     return interaction.channel_id == config.allowed_channel_id
-
 
 # ------------------------------
 # Global interaction check (guild restriction)
@@ -357,7 +350,6 @@ async def global_interaction_check(interaction: discord.Interaction) -> bool:
             await interaction.response.send_message(msg, ephemeral=True)
         return False
     return True
-
 
 # ------------------------------
 # Language selection view
@@ -412,7 +404,6 @@ class LanguageSelectView(discord.ui.View):
             )
         except Exception:
             pass
-
 
 # ------------------------------
 # Confirmation View (Yes / No)
@@ -530,7 +521,7 @@ class ConfirmView(discord.ui.View):
             # Log success
             await log_user_activity(
                 interaction,
-                result=f"Success – link generated",
+                result="Success – link generated",
                 chosen_file=chosen_file.name
             )
 
@@ -579,9 +570,8 @@ class ConfirmView(discord.ui.View):
         except Exception:
             pass
 
-
 # ------------------------------
-# Cleanup task
+# Cleanup task (unchanged)
 # ------------------------------
 async def cleanup_messages(
     channel: discord.TextChannel,
@@ -596,11 +586,10 @@ async def cleanup_messages(
             try:
                 await msg.delete()
             except Exception:
-                pass   # message may already be deleted – silently ignore
-
+                pass
 
 # ------------------------------
-# /channel command
+# /channel command (unchanged)
 # ------------------------------
 @bot.tree.command(
     name="channel",
@@ -651,9 +640,8 @@ async def set_channel(
     except Exception as e:
         log.error(f"Failed to send setup message: {e}")
 
-
 # ------------------------------
-# /create command
+# /create command (unchanged)
 # ------------------------------
 @bot.tree.command(
     name="create",
@@ -682,7 +670,6 @@ async def create(interaction: discord.Interaction):
         ephemeral=True
     )
 
-
 # ------------------------------
 # Bot events
 # ------------------------------
@@ -700,7 +687,6 @@ async def on_ready():
 
     log.info(f"Log reference → {REMOTE_LOG_URL}")
     log.info(f"Local log     → {LOCAL_LOG_FILE.resolve()}")
-
 
 # ------------------------------
 # Run the bot
