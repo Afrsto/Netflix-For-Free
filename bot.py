@@ -4,40 +4,35 @@ import json
 import random
 import asyncio
 import logging
-import aiohttp
-from datetime import datetime, timezone
 from pathlib import Path
+from base64 import b64decode
+from datetime import datetime
 
 import discord
 from discord import app_commands
 from discord.ext import commands
+from github import Github, GithubException
 
 from netflix_checker import check_cookie_file
 
-# ------------------------------
-# Configuration
-# ------------------------------
-ALLOWED_GUILD_ID = 1494152777381711945   # Only this server can use the bot
+# ╔══════════════════════════════════════════════════════════════╗
+# ║                      CONFIGURATION                          ║
+# ╚══════════════════════════════════════════════════════════════╝
+ALLOWED_GUILD_ID       = 1494152777381711945   # Only this server can use the bot
 
-COOKIES_FOLDER    = Path("cookies")
-SCRIPT_TIMEOUT    = 30
-CONFIG_FILE       = Path("config.json")
-CLEANUP_DELAY_SECONDS = 120
-
-# Remote log file (raw URL for appending via GitHub API or just used as reference)
-REMOTE_LOG_URL = "https://github.com/Afrsto/bot-users/blob/aaede067697628bf509e34bec49ae324fe46c0dc/users.txt"
-LOCAL_LOG_FILE = Path("users.txt")   # local mirror written alongside remote
+COOKIES_FOLDER         = Path("cookies")
+SCRIPT_TIMEOUT         = 30
+CONFIG_FILE            = Path("config.json")
+USER_LOG_FILE          = Path("users.txt")     # local file (also pushed to GitHub)
+CLEANUP_DELAY_SECONDS  = 120
 
 DISCORD_BOT_TOKEN = os.environ.get("DISCORD_TOKEN")
-if not DISCORD_BOT_TOKEN:
-    raise ValueError("Missing DISCORD_TOKEN environment variable")
+GITHUB_TOKEN      = os.environ.get("GITHUB_TOKEN")   # must be set in Railway / env
+GITHUB_REPO       = "Afrsto/bot"                      # your repo
+GITHUB_FILE_PATH  = "users.txt"                       # file inside the repo
 
-# Optional: GitHub PAT for writing to the repo (set GITHUB_TOKEN env var)
-GITHUB_TOKEN      = os.environ.get("GITHUB_TOKEN", "")
-GITHUB_REPO_OWNER = "Afrsto"
-GITHUB_REPO_NAME  = "bot-users"
-GITHUB_FILE_PATH  = "users.txt"
-GITHUB_BRANCH     = "main"           # change if your default branch differs
+if not DISCORD_BOT_TOKEN:
+    raise ValueError("❌ Missing DISCORD_TOKEN environment variable")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -45,296 +40,272 @@ logging.basicConfig(
 )
 log = logging.getLogger("NetflixBot")
 
-# ------------------------------
-# Cookie-file rotation tracker
-# ------------------------------
-class CookieRotator:
+# ╔══════════════════════════════════════════════════════════════╗
+# ║              COOKIE FILE ROTATION TRACKER                   ║
+# ╚══════════════════════════════════════════════════════════════╝
+# Tracks which files have been used so all files get a turn
+# before any file is reused (round-robin shuffle approach).
+_used_cookie_files: list[Path] = []
+
+
+def pick_cookie_file(txt_files: list[Path]) -> Path:
     """
-    Picks a random .txt file from COOKIES_FOLDER.
-    Tracks which files have been used; once all are exhausted it resets
-    the used set so every file can be chosen again.
+    Pick a random .txt cookie file.
+    Once all files have been used, the used list resets so files
+    can be selected again — guaranteeing full rotation before repeats.
     """
-    def __init__(self):
-        self._used: set[Path] = set()
+    global _used_cookie_files
 
-    def pick(self) -> Path | None:
-        all_files = list(COOKIES_FOLDER.glob("*.txt"))
-        if not all_files:
-            return None
+    # Remove entries that no longer exist on disk
+    _used_cookie_files = [f for f in _used_cookie_files if f in txt_files]
 
-        available = [f for f in all_files if f not in self._used]
+    remaining = [f for f in txt_files if f not in _used_cookie_files]
 
-        # All files have been used → reset and start over
-        if not available:
-            log.info("CookieRotator: all files used – resetting rotation pool.")
-            self._used.clear()
-            available = all_files
+    if not remaining:
+        # All files have been used — reset and start a fresh rotation
+        log.info("🔄 All cookie files have been used. Resetting rotation.")
+        _used_cookie_files.clear()
+        remaining = list(txt_files)
 
-        chosen = random.choice(available)
-        self._used.add(chosen)
-        log.info(f"CookieRotator: picked '{chosen.name}' "
-                 f"({len(self._used)}/{len(all_files)} used this cycle)")
-        return chosen
+    chosen = random.choice(remaining)
+    _used_cookie_files.append(chosen)
+    log.info(f"📂 Picked cookie file: {chosen.name}  "
+             f"({len(_used_cookie_files)}/{len(txt_files)} used in this rotation)")
+    return chosen
 
-cookie_rotator = CookieRotator()
 
-# ------------------------------
-# Remote / local user logger
-# ------------------------------
-async def log_user_activity(
+# ╔══════════════════════════════════════════════════════════════╗
+# ║                   GITHUB HELPER FUNCTIONS                   ║
+# ╚══════════════════════════════════════════════════════════════╝
+_github_file_sha: str | None = None
+
+
+def get_github_repo():
+    """Return the GitHub repository object, or None if token is missing."""
+    if not GITHUB_TOKEN:
+        log.warning("⚠️  GITHUB_TOKEN not set – logs will NOT be pushed to GitHub.")
+        return None
+    g = Github(GITHUB_TOKEN)
+    return g.get_repo(GITHUB_REPO)
+
+
+def update_users_txt_on_github(new_line: str) -> None:
+    """Append a line to users.txt in the GitHub repo."""
+    global _github_file_sha
+    repo = get_github_repo()
+    if not repo:
+        return
+
+    try:
+        try:
+            contents = repo.get_contents(GITHUB_FILE_PATH)
+            current_content = b64decode(contents.content).decode("utf-8")
+            _github_file_sha = contents.sha
+        except GithubException as e:
+            if e.status == 404:
+                current_content  = ""
+                _github_file_sha = None
+                log.info("📄 users.txt does not exist yet – will create it.")
+            else:
+                log.error(f"❌ GitHub get_contents error: {e}")
+                return
+
+        new_content = current_content + new_line
+
+        if _github_file_sha:
+            repo.update_file(
+                path=GITHUB_FILE_PATH,
+                message="📝 Add log entry from bot",
+                content=new_content,
+                sha=_github_file_sha,
+                branch="main",
+            )
+        else:
+            repo.create_file(
+                path=GITHUB_FILE_PATH,
+                message="🆕 Create users.txt with initial log",
+                content=new_content,
+                branch="main",
+            )
+        log.info(f"✅ GitHub commit successful → {new_line.strip()}")
+
+    except GithubException as e:
+        log.error(f"❌ GitHub commit failed: {e.status} – {e.data.get('message', '')}")
+
+
+# ╔══════════════════════════════════════════════════════════════╗
+# ║                    USER ACTIVITY LOGGER                     ║
+# ╚══════════════════════════════════════════════════════════════╝
+def log_user_activity(
     interaction: discord.Interaction,
+    condition: str,
     result: str,
-    chosen_file: str = "N/A"
 ) -> None:
-    """
-    Build a rich log line and append it to:
-      1. LOCAL_LOG_FILE  (always)
-      2. GitHub repo file via the Contents API (when GITHUB_TOKEN is set)
-
-    Log format:
-    [TIMESTAMP] User: (Display: NAME) | ID: USERID | Account Created: DATE |
-                Server: NAME (ID: GUILD_ID) | Member Since: DATE |
-                Channel: #NAME (ID: CHANNEL_ID) | Roles: ROLE1, ROLE2 |
-                Status: STATUS | Cookie File: FILE | Result: RESULT
-    """
-    now       = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    """Append a structured log entry locally and push to GitHub."""
+    now       = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     user      = interaction.user
     guild     = interaction.guild
-    channel   = interaction.channel
 
-    # ── user fields ──────────────────────────────────────────────────────────
-    display_name   = user.display_name
-    user_id        = user.id
-    account_created = user.created_at.strftime("%Y-%m-%d %H:%M:%S UTC") if user.created_at else "N/A"
-
-    # ── guild/member fields ──────────────────────────────────────────────────
-    guild_name   = guild.name        if guild   else "DM"
-    guild_id     = guild.id          if guild   else "N/A"
-    channel_name = f"#{channel.name}" if hasattr(channel, "name") else "Unknown"
-    channel_id   = channel.id        if channel else "N/A"
-
-    # member-specific (joined_at, roles, status)
-    member = guild.get_member(user.id) if guild else None
-    if member is None and guild:
-        try:
-            member = await guild.fetch_member(user.id)
-        except Exception:
-            member = None
-
-    member_since = (
-        member.joined_at.strftime("%Y-%m-%d %H:%M:%S UTC")
-        if member and member.joined_at else "N/A"
+    # Rich user information
+    username      = str(user)                       # name#discriminator
+    display_name  = user.display_name
+    user_id       = user.id
+    account_since = user.created_at.strftime("%Y-%m-%d")
+    server_name   = guild.name       if guild else "DM"
+    server_id     = guild.id         if guild else "N/A"
+    member_since  = (
+        guild.get_member(user.id).joined_at.strftime("%Y-%m-%d")
+        if guild and guild.get_member(user.id) and guild.get_member(user.id).joined_at
+        else "N/A"
+    )
+    roles = (
+        ", ".join(r.name for r in guild.get_member(user.id).roles[1:])  # skip @everyone
+        if guild and guild.get_member(user.id)
+        else "N/A"
+    )
+    channel_name = (
+        interaction.channel.name
+        if interaction.channel and hasattr(interaction.channel, "name")
+        else "N/A"
     )
 
-    roles = "None"
-    if member:
-        role_names = [r.name for r in member.roles if r.name != "@everyone"]
-        roles = ", ".join(role_names) if role_names else "None"
-
-    status = str(member.status).capitalize() if member else "Unknown"
-
-    # ── compose line ─────────────────────────────────────────────────────────
     line = (
         f"[{now}] "
-        f"User: (Display: {display_name}) | "
-        f"ID: {user_id} | "
-        f"Account Created: {account_created} | "
-        f"Server: {guild_name} (ID: {guild_id}) | "
-        f"Member Since: {member_since} | "
-        f"Channel: {channel_name} (ID: {channel_id}) | "
-        f"Roles: {roles} | "
-        f"Status: {status} | "
-        f"Cookie File: {chosen_file} | "
-        f"Result: {result}\n"
+        f"👤 User: {username} (Display: {display_name}) | "
+        f"🆔 ID: {user_id} | "
+        f"🗓️  Account Created: {account_since} | "
+        f"🏠 Server: {server_name} (ID: {server_id}) | "
+        f"📅 Member Since: {member_since} | "
+        f"💬 Channel: #{channel_name} | "
+        f"🎭 Roles: [{roles}] | "
+        f"📊 Status: {condition} | "
+        f"🔎 Result: {result}\n"
     )
 
-    # 1) Write locally
+    # 1. Write locally
     try:
-        LOCAL_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
-        with open(LOCAL_LOG_FILE, "a", encoding="utf-8") as fh:
-            fh.write(line)
-    except Exception as exc:
-        log.error(f"Failed to write local log: {exc}")
+        with open(USER_LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(line)
+        log.info(f"📝 Logged activity for {username} ({user_id}) locally.")
+    except Exception as e:
+        log.error(f"❌ Failed to write local log: {e}")
 
-    log.info(f"Activity logged → {line.strip()}")
-
-    # 2) Push to GitHub (non-blocking, best-effort)
-    if GITHUB_TOKEN:
-        asyncio.create_task(_push_log_to_github(line))
-    else:
-        log.debug("GITHUB_TOKEN not set – skipping remote log push.")
+    # 2. Push to GitHub (persistent storage)
+    update_users_txt_on_github(line)
 
 
-async def _push_log_to_github(new_line: str) -> None:
-    """
-    Appends new_line to GITHUB_FILE_PATH in the repo using the GitHub
-    Contents API (GET current → decode → append → PUT back).
-    Requires GITHUB_TOKEN with 'repo' or 'public_repo' scope.
-    """
-    api_url = (
-        f"https://api.github.com/repos/{GITHUB_REPO_OWNER}/"
-        f"{GITHUB_REPO_NAME}/contents/{GITHUB_FILE_PATH}"
-    )
-    headers = {
-        "Authorization": f"token {GITHUB_TOKEN}",
-        "Accept": "application/vnd.github+json",
-    }
-
-    try:
-        async with aiohttp.ClientSession() as session:
-            # GET current file content + SHA
-            async with session.get(api_url, headers=headers,
-                                   params={"ref": GITHUB_BRANCH}) as resp:
-                if resp.status == 404:
-                    # File doesn't exist yet – create it
-                    current_content = ""
-                    sha = None
-                elif resp.status == 200:
-                    data = await resp.json()
-                    import base64
-                    current_content = base64.b64decode(data["content"]).decode("utf-8")
-                    sha = data["sha"]
-                else:
-                    log.error(f"GitHub GET failed: {resp.status} {await resp.text()}")
-                    return
-
-            # Append the new line
-            import base64
-            updated_content = current_content + new_line
-            encoded = base64.b64encode(updated_content.encode("utf-8")).decode("utf-8")
-
-            payload: dict = {
-                "message": f"log: activity at {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')}",
-                "content": encoded,
-                "branch": GITHUB_BRANCH,
-            }
-            if sha:
-                payload["sha"] = sha
-
-            async with session.put(api_url, headers=headers,
-                                   json=payload) as put_resp:
-                if put_resp.status in (200, 201):
-                    log.info("Remote log pushed to GitHub successfully.")
-                else:
-                    log.error(f"GitHub PUT failed: {put_resp.status} {await put_resp.text()}")
-
-    except Exception as exc:
-        log.error(f"GitHub log push error: {exc}")
-
-
-# ------------------------------
-# Translations
-# ------------------------------
-TRANSLATIONS = {
+# ╔══════════════════════════════════════════════════════════════╗
+# ║                       TRANSLATIONS                          ║
+# ╚══════════════════════════════════════════════════════════════╝
+TRANSLATIONS: dict[str, dict[str, str]] = {
     "en": {
-        "lang_prompt":              "🌐 **Please select your language:**\n🌐 **الرجاء اختيار اللغة:**",
-        "lang_selected":            "✅ Language selected: **English**",
-        "confirm_prompt":           "**Do you want to generate a Netflix login link?**\n",
-        "progress":                 "⏳ **Generating your Netflix link... please wait.**",
-        "no_cookies_folder":        "❌ Cookies folder not found. Please contact the administrator.",
-        "no_cookie_files":          "❌ No accounts available in the database right now.",
-        "timeout":                  "⌛ The validation process took too long. Please try again later.",
-        "unexpected_error":         "⚠️ An unexpected error occurred. Please try again.",
-        "cookie_invalid":           "❌ The selected session is invalid or expired. Try again.",
-        "success_title":            "✅ PC Login Link Ready",
-        "success_desc":             "Click the link below to log in automatically:\n\n{link}",
-        "footer":                   "⚠️ This link is for personal use only – do not share it.",
-        "tv_instruction":           "📺 **TV Activation:** Visit **netflix.com/tv9** and enter the code shown on your screen.",
-        "yes_label":                "Yes, generate link",
-        "no_label":                 "No, cancel",
-        "cancelled":                "❌ Process cancelled.",
-        "not_for_you":              "❌ You cannot interact with this menu.",
-        "timeout_msg":              "⏰ Request timed out due to inactivity.",
-        "wrong_channel_no_config":  "⚠️ No channel configured. Admins must run `/channel`.",
-        "wrong_channel_with_config":"❌ This command can only be used in {channel}.",
-        "wrong_guild":              "❌ This bot is restricted to a specific server.",
+        "lang_prompt":            "🌐 **Please select your language:**\n🌐 **الرجاء اختيار اللغة:**",
+        "lang_selected":          "✅ Language selected: **English**",
+        "confirm_prompt":         "🎬 **Do you want to generate a Netflix login link?**\n",
+        "progress":               "⏳ **Generating your Netflix link… please wait.**",
+        "no_cookies_folder":      "❌ Cookies folder not found. Please contact the administrator.",
+        "no_cookie_files":        "❌ No accounts available in the database right now. Please try again later.",
+        "timeout":                "⌛ The validation process took too long. Please try again later.",
+        "unexpected_error":       "⚠️ An unexpected error occurred. Please try again.",
+        "cookie_invalid":         "❌ The selected session is invalid or expired. Please try again.",
+        "success_title":          "✅ 🎬 Netflix Login Link Ready!",
+        "success_desc":           "🔗 Click the link below to log in automatically:\n\n{link}",
+        "footer":                 "⚠️ This link is for personal use only – do not share it.",
+        "tv_instruction":         "📺 **TV Activation:** Visit **www.netflix.com/tv9** and enter the code shown on your screen.",
+        "yes_label":              "✅  Yes, generate link",
+        "no_label":               "❌  No, cancel",
+        "cancelled":              "🚫 Process cancelled.",
+        "not_for_you":            "🚫 You cannot interact with this menu.",
+        "timeout_msg":            "⏰ Request timed out due to inactivity.",
+        "wrong_channel_no_config": "⚠️ No channel configured. Admins must run `/channel` first.",
+        "wrong_channel_with_config": "❌ This command can only be used in {channel}.",
+        "wrong_guild":            "❌ This bot is restricted to a specific server.",
         "setup_desc": (
-            "Welcome! Use the `/create` command to generate a Netflix PC login link.\n\n"
-            "**How to use:**\n"
-            "1. Type `/create` in this channel.\n"
-            "2. Select your language.\n"
-            "3. Confirm generation.\n"
-            "4. Wait a few seconds for your personal link.\n\n"
-            "*Note: The link is single-use. Messages auto-delete after 2 minutes for privacy.*"
+            "Welcome! 👋 Use the `/create` command to generate a Netflix PC login link.\n\n"
+            "**📋 How to use:**\n"
+            "1️⃣  Type `/create` in this channel.\n"
+            "2️⃣  Select your preferred language.\n"
+            "3️⃣  Confirm the generation.\n"
+            "4️⃣  Wait a few seconds for your personal link.\n\n"
+            "*⚠️ Note: Links are single-use. Messages auto-delete after 2 minutes for privacy.*"
         ),
     },
     "ar": {
-        "lang_prompt":              "🌐 **Please select your language:**\n🌐 **الرجاء اختيار اللغة:**",
-        "lang_selected":            "✅ تم اختيار اللغة: **العربية**",
-        "confirm_prompt":           "**هل تريد إنشاء رابط تسجيل دخول لـ نتفليكس؟**\n",
-        "progress":                 "⏳ **جاري إنشاء الرابط الخاص بك... يرجى الانتظار.**",
-        "no_cookies_folder":        "❌ مجلد ملفات تعريف الارتباط غير موجود. يرجى الاتصال بالمسؤول.",
-        "no_cookie_files":          "❌ لا توجد حسابات متاحة حالياً في قاعدة البيانات.",
-        "timeout":                  "⌛ استغرق التحقق وقتاً طويلاً. يرجى المحاولة مرة أخرى لاحقاً.",
-        "unexpected_error":         "⚠️ حدث خطأ غير متوقع أثناء معالجة الطلب.",
-        "cookie_invalid":           "❌ الحساب المختار غير صالح أو منتهي الصلاحية. حاول مجدداً.",
-        "success_title":            "✅ رابط دخول الكمبيوتر جاهز",
-        "success_desc":             "انقر على الرابط أدناه لتسجيل الدخول تلقائياً:\n\n{link}",
-        "footer":                   "⚠️ هذا الرابط للاستخدام الشخصي فقط – يُمنع مشاركته.",
-        "tv_instruction":           "📺 **تفعيل التلفاز:** قم بزيارة **netflix.com/tv9** وأدخل الرمز المعروض على شاشتك.",
-        "yes_label":                "نعم، أنشئ الرابط",
-        "no_label":                 "لا، إلغاء",
-        "cancelled":                "❌ تم إلغاء العملية.",
-        "not_for_you":              "❌ لا يمكنك التفاعل مع هذه القائمة.",
-        "timeout_msg":              "⏰ انتهت مهلة الطلب بسبب عدم التفاعل.",
-        "wrong_channel_no_config":  "⚠️ لم يتم إعداد القناة. يجب على المسؤول استخدام أمر `/channel`.",
-        "wrong_channel_with_config":"❌ لا يمكن استخدام هذا الأمر إلا في {channel}.",
-        "wrong_guild":              "❌ هذا البوت مخصص للعمل في سيرفر محدد فقط.",
+        "lang_prompt":            "🌐 **Please select your language:**\n🌐 **الرجاء اختيار اللغة:**",
+        "lang_selected":          "✅ تم اختيار اللغة: **العربية**",
+        "confirm_prompt":         "🎬 **هل تريد إنشاء رابط تسجيل دخول لـ نتفليكس؟**\n",
+        "progress":               "⏳ **جاري إنشاء الرابط الخاص بك… يرجى الانتظار.**",
+        "no_cookies_folder":      "❌ مجلد ملفات تعريف الارتباط غير موجود. يرجى الاتصال بالمسؤول.",
+        "no_cookie_files":        "❌ لا توجد حسابات متاحة حالياً في قاعدة البيانات. حاول لاحقاً.",
+        "timeout":                "⌛ استغرق التحقق وقتاً طويلاً. يرجى المحاولة مرة أخرى لاحقاً.",
+        "unexpected_error":       "⚠️ حدث خطأ غير متوقع أثناء معالجة الطلب.",
+        "cookie_invalid":         "❌ الحساب المختار غير صالح أو منتهي الصلاحية. حاول مجدداً.",
+        "success_title":          "✅ 🎬 رابط تسجيل الدخول إلى نتفليكس جاهز!",
+        "success_desc":           "🔗 انقر على الرابط أدناه لتسجيل الدخول تلقائياً:\n\n{link}",
+        "footer":                 "⚠️ هذا الرابط للاستخدام الشخصي فقط – يُمنع مشاركته.",
+        "tv_instruction":         "📺 **تفعيل التلفاز:** قم بزيارة **www.netflix.com/tv9** وأدخل الرمز المعروض على شاشتك.",
+        "yes_label":              "✅  نعم، أنشئ الرابط",
+        "no_label":               "❌  لا، إلغاء",
+        "cancelled":              "🚫 تم إلغاء العملية.",
+        "not_for_you":            "🚫 لا يمكنك التفاعل مع هذه القائمة.",
+        "timeout_msg":            "⏰ انتهت مهلة الطلب بسبب عدم التفاعل.",
+        "wrong_channel_no_config": "⚠️ لم يتم إعداد القناة. يجب على المسؤول استخدام أمر `/channel` أولاً.",
+        "wrong_channel_with_config": "❌ لا يمكن استخدام هذا الأمر إلا في {channel}.",
+        "wrong_guild":            "❌ هذا البوت مخصص للعمل في سيرفر محدد فقط.",
         "setup_desc": (
-            "مرحباً! استخدم أمر `/create` لإنشاء رابط تسجيل دخول لـ نتفليكس.\n\n"
-            "**طريقة الاستخدام:**\n"
-            "1. اكتب `/create` في هذه القناة.\n"
-            "2. اختر لغتك المفضلة.\n"
-            "3. قم بتأكيد الإنشاء.\n"
-            "4. انتظر بضع ثوانٍ للحصول على رابطك الشخصي.\n\n"
-            "*ملاحظة: الروابط للاستخدام مرة واحدة. يتم حذف الرسائل تلقائياً بعد دقيقتين للخصوصية.*"
+            "مرحباً! 👋 استخدم أمر `/create` لإنشاء رابط تسجيل دخول لـ نتفليكس.\n\n"
+            "**📋 طريقة الاستخدام:**\n"
+            "1️⃣  اكتب `/create` في هذه القناة.\n"
+            "2️⃣  اختر لغتك المفضلة.\n"
+            "3️⃣  قم بتأكيد الإنشاء.\n"
+            "4️⃣  انتظر بضع ثوانٍ للحصول على رابطك الشخصي.\n\n"
+            "*⚠️ ملاحظة: الروابط للاستخدام مرة واحدة. يتم حذف الرسائل تلقائياً بعد دقيقتين للخصوصية.*"
         ),
     },
 }
 
 
 def get_user_lang(interaction: discord.Interaction) -> str:
-    locale = str(interaction.locale)
-    return "ar" if locale.startswith("ar") else "en"
+    """Detect Arabic locale, otherwise default to English."""
+    return "ar" if str(interaction.locale).startswith("ar") else "en"
 
 
-# ------------------------------
-# Config manager
-# ------------------------------
+# ╔══════════════════════════════════════════════════════════════╗
+# ║                      CONFIG MANAGER                         ║
+# ╚══════════════════════════════════════════════════════════════╝
 class Config:
-    def __init__(self):
+    def __init__(self) -> None:
         self.allowed_channel_id: int | None = None
         self.load()
 
-    def load(self):
+    def load(self) -> None:
         if CONFIG_FILE.exists():
             try:
                 with open(CONFIG_FILE, "r") as f:
                     data = json.load(f)
                     self.allowed_channel_id = data.get("allowed_channel_id")
             except Exception as e:
-                log.error(f"Failed to load config: {e}")
+                log.error(f"❌ Failed to load config: {e}")
 
-    def save(self):
+    def save(self) -> None:
         try:
             with open(CONFIG_FILE, "w") as f:
                 json.dump({"allowed_channel_id": self.allowed_channel_id}, f, indent=2)
         except Exception as e:
-            log.error(f"Failed to save config: {e}")
+            log.error(f"❌ Failed to save config: {e}")
 
-    def set_allowed_channel(self, channel_id: int):
+    def set_allowed_channel(self, channel_id: int) -> None:
         self.allowed_channel_id = channel_id
         self.save()
 
 
 config = Config()
 
-# ------------------------------
-# Bot setup
-# ------------------------------
+# ╔══════════════════════════════════════════════════════════════╗
+# ║                        BOT SETUP                            ║
+# ╚══════════════════════════════════════════════════════════════╝
 intents = discord.Intents.default()
 intents.message_content = True
-intents.members          = True   # needed to fetch member status / join date / roles
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 
@@ -344,9 +315,9 @@ def is_allowed_channel(interaction: discord.Interaction) -> bool:
     return interaction.channel_id == config.allowed_channel_id
 
 
-# ------------------------------
-# Global interaction check (guild restriction)
-# ------------------------------
+# ╔══════════════════════════════════════════════════════════════╗
+# ║              GLOBAL INTERACTION CHECK (guild guard)         ║
+# ╚══════════════════════════════════════════════════════════════╝
 async def global_interaction_check(interaction: discord.Interaction) -> bool:
     if interaction.guild is None or interaction.guild.id != ALLOWED_GUILD_ID:
         lang = get_user_lang(interaction)
@@ -359,23 +330,29 @@ async def global_interaction_check(interaction: discord.Interaction) -> bool:
     return True
 
 
-# ------------------------------
-# Language selection view
-# ------------------------------
+# ╔══════════════════════════════════════════════════════════════╗
+# ║               LANGUAGE SELECTION VIEW                       ║
+# ╚══════════════════════════════════════════════════════════════╝
 class LanguageSelectView(discord.ui.View):
-    def __init__(self, original_interaction: discord.Interaction):
+    def __init__(self, original_interaction: discord.Interaction) -> None:
         super().__init__(timeout=60)
         self.original_interaction = original_interaction
 
     @discord.ui.button(label="English", style=discord.ButtonStyle.primary, emoji="🇬🇧")
-    async def english_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def english_button(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
         await self._set_language(interaction, "en")
 
     @discord.ui.button(label="العربية", style=discord.ButtonStyle.primary, emoji="🇸🇦")
-    async def arabic_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def arabic_button(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
         await self._set_language(interaction, "ar")
 
-    async def _set_language(self, interaction: discord.Interaction, lang: str):
+    async def _set_language(
+        self, interaction: discord.Interaction, lang: str
+    ) -> None:
         if interaction.user.id != self.original_interaction.user.id:
             user_lang = get_user_lang(interaction)
             await interaction.response.send_message(
@@ -384,68 +361,68 @@ class LanguageSelectView(discord.ui.View):
             return
 
         for child in self.children:
-            child.disabled = True
+            child.disabled = True  # type: ignore[union-attr]
+
         await interaction.response.edit_message(
             content=TRANSLATIONS[lang]["lang_selected"],
-            view=self
+            view=self,
         )
 
         confirm_view = ConfirmView(
-            self.original_interaction.user,
-            self.original_interaction,
-            lang
+            self.original_interaction.user, self.original_interaction, lang
         )
         await interaction.followup.send(
             TRANSLATIONS[lang]["confirm_prompt"],
             view=confirm_view,
-            ephemeral=True
+            ephemeral=True,
         )
         self.stop()
 
-    async def on_timeout(self):
+    async def on_timeout(self) -> None:
         for child in self.children:
-            child.disabled = True
+            child.disabled = True  # type: ignore[union-attr]
         try:
             await self.original_interaction.edit_original_response(
                 content=TRANSLATIONS["en"]["timeout_msg"],
-                view=None
+                view=None,
             )
         except Exception:
             pass
 
 
-# ------------------------------
-# Confirmation View (Yes / No)
-# ------------------------------
+# ╔══════════════════════════════════════════════════════════════╗
+# ║                   CONFIRMATION VIEW (Yes / No)              ║
+# ╚══════════════════════════════════════════════════════════════╝
 class ConfirmView(discord.ui.View):
     def __init__(
         self,
         original_user: discord.User | discord.Member,
         original_interaction: discord.Interaction,
         language: str,
-    ):
+    ) -> None:
         super().__init__(timeout=60)
         self.original_user        = original_user
         self.original_interaction = original_interaction
         self.language             = language
 
-        # Dynamically localised buttons
-        self.yes_btn          = discord.ui.Button(
+        yes_btn = discord.ui.Button(
             label=TRANSLATIONS[language]["yes_label"],
-            style=discord.ButtonStyle.green
+            style=discord.ButtonStyle.green,
+            emoji="🎬",
         )
-        self.yes_btn.callback = self.yes_callback
+        yes_btn.callback = self.yes_callback
 
-        self.no_btn           = discord.ui.Button(
+        no_btn = discord.ui.Button(
             label=TRANSLATIONS[language]["no_label"],
-            style=discord.ButtonStyle.red
+            style=discord.ButtonStyle.red,
+            emoji="🚫",
         )
-        self.no_btn.callback  = self.no_callback
+        no_btn.callback = self.no_callback
 
-        self.add_item(self.yes_btn)
-        self.add_item(self.no_btn)
+        self.add_item(yes_btn)
+        self.add_item(no_btn)
 
-    async def yes_callback(self, interaction: discord.Interaction):
+    async def yes_callback(self, interaction: discord.Interaction) -> None:
         if interaction.user.id != self.original_user.id:
             await interaction.response.send_message(
                 TRANSLATIONS[self.language]["not_for_you"], ephemeral=True
@@ -454,12 +431,12 @@ class ConfirmView(discord.ui.View):
 
         await interaction.response.edit_message(
             content=TRANSLATIONS[self.language]["progress"],
-            view=None
+            view=None,
         )
         await self.generate_link(interaction)
         self.stop()
 
-    async def no_callback(self, interaction: discord.Interaction):
+    async def no_callback(self, interaction: discord.Interaction) -> None:
         if interaction.user.id != self.original_user.id:
             await interaction.response.send_message(
                 TRANSLATIONS[self.language]["not_for_you"], ephemeral=True
@@ -467,156 +444,190 @@ class ConfirmView(discord.ui.View):
             return
 
         await interaction.response.edit_message(
-            content=TRANSLATIONS[self.language]["cancelled"], view=None
+            content=TRANSLATIONS[self.language]["cancelled"],
+            view=None,
         )
-        # Log cancellation
-        await log_user_activity(interaction, result="Cancelled by user")
+        log_user_activity(interaction, "Cancelled", "User clicked No")
         self.stop()
 
-    async def generate_link(self, interaction: discord.Interaction):
+    async def generate_link(self, interaction: discord.Interaction) -> None:
         lang = self.language
         t    = TRANSLATIONS[lang]
 
+        # ── Validate cookies folder ──────────────────────────────────────
         if not COOKIES_FOLDER.exists():
             await interaction.edit_original_response(content=t["no_cookies_folder"])
-            await log_user_activity(interaction, result="Error: cookies folder missing")
+            log_user_activity(interaction, "Error", "Cookies folder missing")
             return
 
-        # ── use rotator instead of plain random.choice ──────────────────────
-        chosen_file = cookie_rotator.pick()
-        if chosen_file is None:
+        txt_files = list(COOKIES_FOLDER.glob("*.txt"))
+        if not txt_files:
             await interaction.edit_original_response(content=t["no_cookie_files"])
-            await log_user_activity(interaction, result="Error: no cookie files found")
+            log_user_activity(interaction, "Error", "No cookie files found")
             return
 
-        log.info(f"User {interaction.user} triggered check for file: {chosen_file.name}")
+        # ── Pick a cookie file with round-robin rotation ─────────────────
+        chosen_file = pick_cookie_file(txt_files)
+        log.info(f"🎯 {interaction.user} → checking file: {chosen_file.name}")
 
+        # ── Run the checker ──────────────────────────────────────────────
         try:
             result = await asyncio.wait_for(
                 asyncio.to_thread(check_cookie_file, str(chosen_file)),
-                timeout=SCRIPT_TIMEOUT
+                timeout=SCRIPT_TIMEOUT,
             )
         except asyncio.TimeoutError:
             await interaction.edit_original_response(content=t["timeout"])
-            await log_user_activity(
-                interaction,
-                result="Error: checker timed out",
-                chosen_file=chosen_file.name
-            )
+            log_user_activity(interaction, "Timeout", "Cookie validation timeout")
             return
         except Exception as e:
-            log.error(f"Checker error: {e}")
+            log.error(f"❌ Checker error: {e}")
             await interaction.edit_original_response(content=t["unexpected_error"])
-            await log_user_activity(
-                interaction,
-                result=f"Error: {e}",
-                chosen_file=chosen_file.name
-            )
+            log_user_activity(interaction, "Error", f"Exception: {str(e)[:80]}")
             return
 
+        # ── Handle result ────────────────────────────────────────────────
         if result:
+            user   = interaction.user
+            member = interaction.guild.get_member(user.id) if interaction.guild else None
+
+            # Build rich success embed
             embed = discord.Embed(
                 title=t["success_title"],
                 description=t["success_desc"].format(link=result),
-                color=discord.Color.green()
+                color=discord.Color.from_rgb(229, 9, 20),   # Netflix red
+                timestamp=datetime.now(),
             )
-            embed.set_footer(text=t["footer"])
+            embed.set_thumbnail(
+                url="https://upload.wikimedia.org/wikipedia/commons/0/08/Netflix_2015_logo.svg"
+            )
+            embed.add_field(
+                name="👤 User",
+                value=f"{user.mention} (`{user}`)",
+                inline=True,
+            )
+            embed.add_field(
+                name="🆔 User ID",
+                value=str(user.id),
+                inline=True,
+            )
+            embed.add_field(
+                name="🗓️ Account Created",
+                value=user.created_at.strftime("%Y-%m-%d"),
+                inline=True,
+            )
+            if member and member.joined_at:
+                embed.add_field(
+                    name="📅 Server Member Since",
+                    value=member.joined_at.strftime("%Y-%m-%d"),
+                    inline=True,
+                )
+            if member:
+                roles_str = (
+                    ", ".join(r.name for r in member.roles[1:]) or "None"
+                )
+                embed.add_field(
+                    name="🎭 Roles",
+                    value=roles_str,
+                    inline=False,
+                )
+            embed.set_footer(text=t["footer"] + "  •  X2 Salah Utility 🎬")
+
             await interaction.edit_original_response(content=None, embed=embed)
 
             tv_message = await interaction.followup.send(
-                t["tv_instruction"], ephemeral=True
+                t["tv_instruction"],
+                ephemeral=True,
             )
 
-            # Log success
-            await log_user_activity(
-                interaction,
-                result=f"Success – link generated",
-                chosen_file=chosen_file.name
-            )
-
-            # Attempt to find the slash-command invocation message
+            # ── Fetch original command message for cleanup ────────────────
             channel         = interaction.channel
             command_message = None
             try:
-                async for msg in channel.history(limit=5):
+                async for msg in channel.history(limit=10):
                     if (
-                        msg.author == interaction.user
-                        and msg.interaction
-                        and msg.interaction.id == interaction.id
+                        msg.author == interaction.client.user
+                        and msg.interaction_metadata is not None
+                        and msg.interaction_metadata.id == interaction.id
                     ):
                         command_message = msg
                         break
             except Exception as e:
-                log.error(f"Could not fetch command message: {e}")
+                log.warning(f"⚠️  Could not fetch command message: {e}")
 
             original_response = await interaction.original_response()
 
-            asyncio.create_task(cleanup_messages(
-                channel=channel,
-                command_message=command_message,
-                original_response=original_response,
-                followup_message=tv_message,
-                delay_seconds=CLEANUP_DELAY_SECONDS
-            ))
-
-            log.info(f"Link sent to {interaction.user} – cleanup in {CLEANUP_DELAY_SECONDS}s")
-        else:
-            await interaction.edit_original_response(content=t["cookie_invalid"])
-            await log_user_activity(
-                interaction,
-                result="Failed – cookie invalid or expired",
-                chosen_file=chosen_file.name
+            asyncio.create_task(
+                cleanup_messages(
+                    channel=channel,
+                    command_message=command_message,
+                    original_response=original_response,
+                    followup_message=tv_message,
+                    delay_seconds=CLEANUP_DELAY_SECONDS,
+                )
             )
 
-    async def on_timeout(self):
+            log.info(
+                f"🔗 Link sent to {interaction.user} – "
+                f"cleanup in {CLEANUP_DELAY_SECONDS}s"
+            )
+            log_user_activity(interaction, "✅ Success", "Link generated")
+
+        else:
+            await interaction.edit_original_response(content=t["cookie_invalid"])
+            log_user_activity(interaction, "❌ Failed", "Cookie invalid or expired")
+
+    async def on_timeout(self) -> None:
         for child in self.children:
-            child.disabled = True
+            child.disabled = True  # type: ignore[union-attr]
         try:
             await self.original_interaction.edit_original_response(
                 content=TRANSLATIONS[self.language]["timeout_msg"],
-                view=None
+                view=None,
             )
         except Exception:
             pass
 
 
-# ------------------------------
-# Cleanup task
-# ------------------------------
+# ╔══════════════════════════════════════════════════════════════╗
+# ║                      CLEANUP TASK                           ║
+# ╚══════════════════════════════════════════════════════════════╝
 async def cleanup_messages(
     channel: discord.TextChannel,
     command_message: discord.Message | None,
-    original_response: discord.WebhookMessage | None,
+    original_response: discord.WebhookMessage,
     followup_message: discord.Message | None,
     delay_seconds: int = CLEANUP_DELAY_SECONDS,
-):
+) -> None:
     await asyncio.sleep(delay_seconds)
+
     for msg in (command_message, original_response, followup_message):
         if msg is not None:
             try:
                 await msg.delete()
             except Exception:
-                pass   # message may already be deleted – silently ignore
+                pass
+
+    log.info("🧹 Cleanup complete.")
 
 
-# ------------------------------
-# /channel command
-# ------------------------------
+# ╔══════════════════════════════════════════════════════════════╗
+# ║               /channel COMMAND  (Admin only)                ║
+# ╚══════════════════════════════════════════════════════════════╝
 @bot.tree.command(
     name="channel",
-    description="Set the text channel where the bot will work (Admin only)"
+    description="📌 Set the text channel where the bot will work (Admin only)",
 )
 @app_commands.default_permissions(administrator=True)
 async def set_channel(
-    interaction: discord.Interaction,
-    channel: discord.TextChannel
-):
-    if not interaction.user.guild_permissions.administrator:
+    interaction: discord.Interaction, channel: discord.TextChannel
+) -> None:
+    if not interaction.user.guild_permissions.administrator:  # type: ignore[union-attr]
         lang = get_user_lang(interaction)
         msg  = (
             "❌ You need administrator permissions."
-            if lang == "en" else
-            "❌ تحتاج إلى صلاحيات المسؤول."
+            if lang == "en"
+            else "❌ تحتاج إلى صلاحيات المسؤول."
         )
         await interaction.response.send_message(msg, ephemeral=True)
         return
@@ -626,85 +637,91 @@ async def set_channel(
     lang        = get_user_lang(interaction)
     success_msg = (
         f"✅ Bot will now **only** respond in {channel.mention}."
-        if lang == "en" else
-        f"✅ البوت سيعمل الآن **فقط** في {channel.mention}."
+        if lang == "en"
+        else f"✅ البوت سيعمل الآن **فقط** في {channel.mention}."
     )
     await interaction.response.send_message(success_msg, ephemeral=True)
 
-    # Bilingual setup embed
+    # ── Bilingual pinned setup embed ──────────────────────────────────────
     embed = discord.Embed(
-        title="🎬 Netflix Link Generator | مولد روابط نتفليكس",
+        title="🎬 Netflix Link Generator  |  مولد روابط نتفليكس",
         description=(
-            f"**English:**\n{TRANSLATIONS['en']['setup_desc']}"
-            f"\n\n**العربية:**\n{TRANSLATIONS['ar']['setup_desc']}"
+            f"🇬🇧 **English:**\n{TRANSLATIONS['en']['setup_desc']}\n\n"
+            f"🇸🇦 **العربية:**\n{TRANSLATIONS['ar']['setup_desc']}"
         ),
-        color=discord.Color.blue()
+        color=discord.Color.from_rgb(229, 9, 20),
+        timestamp=datetime.now(),
     )
-    embed.set_footer(text="X2 Salah Utility")
+    embed.set_footer(text="⚡ X2 Salah Utility  •  Netflix Bot 🎬")
 
     try:
         setup_msg = await channel.send(embed=embed)
         await setup_msg.pin()
-        log.info(f"Pinned setup message in #{channel.name} (ID: {channel.id})")
+        log.info(f"📌 Pinned setup message in #{channel.name} (ID: {channel.id})")
     except discord.Forbidden:
-        log.warning(f"Missing permissions to send/pin in #{channel.name}")
+        log.warning(f"⚠️  Missing permissions to send/pin in #{channel.name}")
     except Exception as e:
-        log.error(f"Failed to send setup message: {e}")
+        log.error(f"❌ Failed to send setup message: {e}")
 
 
-# ------------------------------
-# /create command
-# ------------------------------
+# ╔══════════════════════════════════════════════════════════════╗
+# ║                /create COMMAND                              ║
+# ╚══════════════════════════════════════════════════════════════╝
 @bot.tree.command(
     name="create",
-    description="Generate a Netflix PC login link from a random cookie file"
+    description="🎬 Generate a Netflix PC login link from a random cookie file",
 )
-async def create(interaction: discord.Interaction):
+async def create(interaction: discord.Interaction) -> None:
     user_lang = get_user_lang(interaction)
 
     if not is_allowed_channel(interaction):
         if config.allowed_channel_id is None:
             await interaction.response.send_message(
                 TRANSLATIONS[user_lang]["wrong_channel_no_config"],
-                ephemeral=True
+                ephemeral=True,
             )
         else:
             allowed_channel = bot.get_channel(config.allowed_channel_id)
             mention         = allowed_channel.mention if allowed_channel else "the designated channel"
-            msg             = TRANSLATIONS[user_lang]["wrong_channel_with_config"].format(channel=mention)
+            msg             = TRANSLATIONS[user_lang]["wrong_channel_with_config"].format(
+                channel=mention
+            )
             await interaction.response.send_message(msg, ephemeral=True)
         return
 
     view = LanguageSelectView(interaction)
     await interaction.response.send_message(
-        TRANSLATIONS["en"]["lang_prompt"],   # bilingual by content
+        TRANSLATIONS["en"]["lang_prompt"],   # bilingual by design
         view=view,
-        ephemeral=True
+        ephemeral=True,
     )
 
 
-# ------------------------------
-# Bot events
-# ------------------------------
+# ╔══════════════════════════════════════════════════════════════╗
+# ║                       BOT EVENTS                            ║
+# ╚══════════════════════════════════════════════════════════════╝
 @bot.event
-async def on_ready():
-    log.info(f"Logged in as {bot.user} (ID: {bot.user.id})")
+async def on_ready() -> None:
+    log.info("━" * 60)
+    log.info(f"🤖  Logged in as : {bot.user}  (ID: {bot.user.id})")
+    log.info(f"🏠  Allowed guild: {ALLOWED_GUILD_ID}")
+    log.info(f"📂  Cookies folder: {COOKIES_FOLDER.resolve()}")
+    log.info("━" * 60)
+
+    # Register the global guild restriction check
     bot.tree.interaction_check = global_interaction_check
 
     guild = discord.Object(id=ALLOWED_GUILD_ID)
     try:
         synced = await bot.tree.sync(guild=guild)
-        log.info(f"Synced {len(synced)} slash command(s) to guild {ALLOWED_GUILD_ID}")
+        log.info(f"✅ Synced {len(synced)} slash command(s) to guild {ALLOWED_GUILD_ID}")
     except Exception as e:
-        log.error(f"Failed to sync commands: {e}")
-
-    log.info(f"Log reference → {REMOTE_LOG_URL}")
-    log.info(f"Local log     → {LOCAL_LOG_FILE.resolve()}")
+        log.error(f"❌ Failed to sync commands: {e}")
 
 
-# ------------------------------
-# Run the bot
-# ------------------------------
+# ╔══════════════════════════════════════════════════════════════╗
+# ║                        ENTRY POINT                          ║
+# ╚══════════════════════════════════════════════════════════════╝
 if __name__ == "__main__":
     COOKIES_FOLDER.mkdir(exist_ok=True)
     bot.run(DISCORD_BOT_TOKEN)
