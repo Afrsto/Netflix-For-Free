@@ -1,6 +1,5 @@
 # bot.py
 import os
-import re
 import json
 import random
 import asyncio
@@ -43,17 +42,14 @@ GITHUB_REPO = None
 GITHUB_FILE_PATH = None
 
 if REMOTE_LOG_URL:
-    # Extract owner/repo from the URL
     parsed = urlparse(REMOTE_LOG_URL)
     if parsed.netloc == "github.com":
         path_parts = parsed.path.strip("/").split("/")
         if len(path_parts) >= 2:
             owner_repo = f"{path_parts[0]}/{path_parts[1]}"
-            # Find the file path after '/blob/<commit>/'
             if "blob" in path_parts:
                 idx = path_parts.index("blob")
                 if idx + 2 < len(path_parts):
-                    # path after the commit hash
                     GITHUB_FILE_PATH = "/".join(path_parts[idx+2:])
                     GITHUB_REPO = owner_repo
     if not GITHUB_REPO:
@@ -161,9 +157,9 @@ def update_users_txt_on_github(new_line: str) -> None:
 
 
 # ╔══════════════════════════════════════════════════════════════╗
-# ║                    USER ACTIVITY LOGGER                     ║
+# ║                    USER ACTIVITY LOGGER (ASYNC)             ║
 # ╚══════════════════════════════════════════════════════════════╝
-def log_user_activity(
+async def log_user_activity(
     interaction: discord.Interaction,
     condition: str,
     result: str,
@@ -180,16 +176,25 @@ def log_user_activity(
     account_since = user.created_at.strftime("%Y-%m-%d")
     server_name   = guild.name       if guild else "DM"
     server_id     = guild.id         if guild else "N/A"
-    member_since  = (
-        guild.get_member(user.id).joined_at.strftime("%Y-%m-%d")
-        if guild and guild.get_member(user.id) and guild.get_member(user.id).joined_at
-        else "N/A"
-    )
-    roles = (
-        ", ".join(r.name for r in guild.get_member(user.id).roles[1:])
-        if guild and guild.get_member(user.id)
-        else "N/A"
-    )
+
+    # ── Fetch fresh member data to avoid cache issues ─────────────────
+    member_since = "N/A"
+    roles_str    = "N/A"
+
+    if guild:
+        try:
+            # Force fetch the member from Discord API (bypass cache)
+            member = await guild.fetch_member(user.id)
+            if member.joined_at:
+                member_since = member.joined_at.strftime("%Y-%m-%d")
+            # Get roles (skip @everyone)
+            if member.roles:
+                roles_str = ", ".join(r.name for r in member.roles[1:]) or "None"
+        except discord.NotFound:
+            log.warning(f"⚠️ Member {user.id} not found in guild {guild.id}")
+        except Exception as e:
+            log.warning(f"⚠️ Failed to fetch member {user.id}: {e}")
+
     channel_name = (
         interaction.channel.name
         if interaction.channel and hasattr(interaction.channel, "name")
@@ -204,12 +209,12 @@ def log_user_activity(
         f"🏠 Server: {server_name} (ID: {server_id}) | "
         f"📅 Member Since: {member_since} | "
         f"💬 Channel: #{channel_name} | "
-        f"🎭 Roles: [{roles}] | "
+        f"🎭 Roles: [{roles_str}] | "
         f"📊 Status: {condition} | "
         f"🔎 Result: {result}\n"
     )
 
-    # 1. Write locally (ephemeral, but useful for debugging)
+    # 1. Write locally
     try:
         with open(USER_LOG_FILE, "a", encoding="utf-8") as f:
             f.write(line)
@@ -238,7 +243,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "success_title":          "✅ 🎬 Netflix Login Link Ready!",
         "success_desc":           "🔗 Click the link below to log in automatically:\n\n{link}",
         "footer":                 "⚠️ This link is for personal use only – do not share it.",
-        "tv_instruction":         "📺 **TV Activation:** Visit **netflix.com/tv9** and enter the code shown on your screen.",
+        "tv_instruction":         "📺 **TV Activation:** Visit **www.netflix.com/tv9** and enter the code shown on your screen.",
         "yes_label":              "✅  Yes, generate link",
         "no_label":               "❌  No, cancel",
         "cancelled":              "🚫 Process cancelled.",
@@ -270,7 +275,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "success_title":          "✅ 🎬 رابط تسجيل الدخول إلى نتفليكس جاهز!",
         "success_desc":           "🔗 انقر على الرابط أدناه لتسجيل الدخول تلقائياً:\n\n{link}",
         "footer":                 "⚠️ هذا الرابط للاستخدام الشخصي فقط – يُمنع مشاركته.",
-        "tv_instruction":         "📺 **تفعيل التلفاز:** قم بزيارة **netflix.com/tv9** وأدخل الرمز المعروض على شاشتك.",
+        "tv_instruction":         "📺 **تفعيل التلفاز:** قم بزيارة **www.netflix.com/tv9** وأدخل الرمز المعروض على شاشتك.",
         "yes_label":              "✅  نعم، أنشئ الرابط",
         "no_label":               "❌  لا، إلغاء",
         "cancelled":              "🚫 تم إلغاء العملية.",
@@ -430,7 +435,7 @@ class ConfirmView(discord.ui.View):
             return
 
         await interaction.response.edit_message(content=TRANSLATIONS[self.language]["cancelled"], view=None)
-        log_user_activity(interaction, "Cancelled", "User clicked No")
+        await log_user_activity(interaction, "Cancelled", "User clicked No")
         self.stop()
 
     async def generate_link(self, interaction: discord.Interaction) -> None:
@@ -439,13 +444,13 @@ class ConfirmView(discord.ui.View):
 
         if not COOKIES_FOLDER.exists():
             await interaction.edit_original_response(content=t["no_cookies_folder"])
-            log_user_activity(interaction, "Error", "Cookies folder missing")
+            await log_user_activity(interaction, "Error", "Cookies folder missing")
             return
 
         txt_files = list(COOKIES_FOLDER.glob("*.txt"))
         if not txt_files:
             await interaction.edit_original_response(content=t["no_cookie_files"])
-            log_user_activity(interaction, "Error", "No cookie files found")
+            await log_user_activity(interaction, "Error", "No cookie files found")
             return
 
         chosen_file = pick_cookie_file(txt_files)
@@ -455,12 +460,12 @@ class ConfirmView(discord.ui.View):
             result = await asyncio.wait_for(asyncio.to_thread(check_cookie_file, str(chosen_file)), timeout=SCRIPT_TIMEOUT)
         except asyncio.TimeoutError:
             await interaction.edit_original_response(content=t["timeout"])
-            log_user_activity(interaction, "Timeout", "Cookie validation timeout")
+            await log_user_activity(interaction, "Timeout", "Cookie validation timeout")
             return
         except Exception as e:
             log.error(f"❌ Checker error: {e}")
             await interaction.edit_original_response(content=t["unexpected_error"])
-            log_user_activity(interaction, "Error", f"Exception: {str(e)[:80]}")
+            await log_user_activity(interaction, "Error", f"Exception: {str(e)[:80]}")
             return
 
         if result:
@@ -508,10 +513,10 @@ class ConfirmView(discord.ui.View):
             ))
 
             log.info(f"🔗 Link sent to {interaction.user} – cleanup in {CLEANUP_DELAY_SECONDS}s")
-            log_user_activity(interaction, "✅ Success", "Link generated")
+            await log_user_activity(interaction, "✅ Success", "Link generated")
         else:
             await interaction.edit_original_response(content=t["cookie_invalid"])
-            log_user_activity(interaction, "❌ Failed", "Cookie invalid or expired")
+            await log_user_activity(interaction, "❌ Failed", "Cookie invalid or expired")
 
     async def on_timeout(self) -> None:
         for child in self.children:
