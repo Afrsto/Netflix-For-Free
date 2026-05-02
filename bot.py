@@ -17,7 +17,7 @@ from netflix_checker import check_cookie_file
 # ------------------------------
 # Configuration
 # ------------------------------
-ALLOWED_GUILD_ID = 1494152777381711945   # Only this server can use the bot
+ALLOWED_GUILD_ID = 1499964437488996373   # Only this server can use the bot
 
 COOKIES_FOLDER    = Path("cookies")
 SCRIPT_TIMEOUT    = 30
