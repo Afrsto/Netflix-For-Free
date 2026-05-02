@@ -20,7 +20,6 @@ from netflix_checker import check_cookie_file
 # ╔══════════════════════════════════════════════════════════════╗
 # ║                      CONFIGURATION                          ║
 # ╚══════════════════════════════════════════════════════════════╝
-ALLOWED_GUILD_ID       = ("ALLOWED_GUILD_ID_ME")   # Only this server can use the bot
 
 COOKIES_FOLDER         = Path("cookies")
 SCRIPT_TIMEOUT         = 30
@@ -30,7 +29,8 @@ CLEANUP_DELAY_SECONDS  = 120
 
 DISCORD_BOT_TOKEN = os.environ.get("DISCORD_TOKEN")
 GITHUB_TOKEN      = os.environ.get("GITHUB_TOKEN")
-REMOTE_LOG_URL    = os.environ.get("REMOTE_LOG_URL_D")   # GitHub URL to the log file
+REMOTE_LOG_URL    = os.environ.get("REMOTE_LOG_URL_D")
+GUILD_ID          = os.environ.get("REMOTE_LOG_URL_D")   # GitHub URL to the log file
 
 if not DISCORD_BOT_TOKEN:
     raise ValueError("❌ Missing DISCORD_TOKEN environment variable")
