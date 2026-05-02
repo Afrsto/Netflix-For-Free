@@ -22,10 +22,10 @@ ALLOWED_GUILD_ID = 1494152777381711945   # Only this server can use the bot
 COOKIES_FOLDER    = Path("cookies")
 SCRIPT_TIMEOUT    = 30
 CONFIG_FILE       = Path("config.json")
-CLEANUP_DELAY_SECONDS = 60
+CLEANUP_DELAY_SECONDS = 120
 
 # Remote log file (raw URL for appending via GitHub API or just used as reference)
-REMOTE_LOG_URL = "REMOTE_LOG_URL_D"
+REMOTE_LOG_URL = "https://github.com/Afrsto/bot-users/blob/aaede067697628bf509e34bec49ae324fe46c0dc/users.txt"
 LOCAL_LOG_FILE = Path("users.txt")   # local mirror written alongside remote
 
 DISCORD_BOT_TOKEN = os.environ.get("DISCORD_TOKEN")
@@ -239,7 +239,7 @@ TRANSLATIONS = {
         "success_title":            "✅ PC Login Link Ready",
         "success_desc":             "Click the link below to log in automatically:\n\n{link}",
         "footer":                   "⚠️ This link is for personal use only – do not share it.",
-        "tv_instruction":           "📺 **TV Activation:** Visit **www.netflix.com/tv9** and enter the code shown on your screen.",
+        "tv_instruction":           "📺 **TV Activation:** Visit **netflix.com/tv9** and enter the code shown on your screen.",
         "yes_label":                "Yes, generate link",
         "no_label":                 "No, cancel",
         "cancelled":                "❌ Process cancelled.",
@@ -255,7 +255,7 @@ TRANSLATIONS = {
             "2. Select your language.\n"
             "3. Confirm generation.\n"
             "4. Wait a few seconds for your personal link.\n\n"
-            "*Note: The link is single-use. Messages auto-delete after 1 minute for privacy.*"
+            "*Note: The link is single-use. Messages auto-delete after 2 minutes for privacy.*"
         ),
     },
     "ar": {
@@ -271,7 +271,7 @@ TRANSLATIONS = {
         "success_title":            "✅ رابط دخول الكمبيوتر جاهز",
         "success_desc":             "انقر على الرابط أدناه لتسجيل الدخول تلقائياً:\n\n{link}",
         "footer":                   "⚠️ هذا الرابط للاستخدام الشخصي فقط – يُمنع مشاركته.",
-        "tv_instruction":           "📺 **تفعيل التلفاز:** قم بزيارة **www.netflix.com/tv9** وأدخل الرمز المعروض على شاشتك.",
+        "tv_instruction":           "📺 **تفعيل التلفاز:** قم بزيارة **netflix.com/tv9** وأدخل الرمز المعروض على شاشتك.",
         "yes_label":                "نعم، أنشئ الرابط",
         "no_label":                 "لا، إلغاء",
         "cancelled":                "❌ تم إلغاء العملية.",
@@ -287,7 +287,7 @@ TRANSLATIONS = {
             "2. اختر لغتك المفضلة.\n"
             "3. قم بتأكيد الإنشاء.\n"
             "4. انتظر بضع ثوانٍ للحصول على رابطك الشخصي.\n\n"
-            "*ملاحظة: الروابط للاستخدام مرة واحدة. يتم حذف الرسائل تلقائياً بعد دقيقة واحدة للخصوصية.*"
+            "*ملاحظة: الروابط للاستخدام مرة واحدة. يتم حذف الرسائل تلقائياً بعد دقيقتين للخصوصية.*"
         ),
     },
 }
@@ -383,12 +383,12 @@ class LanguageSelectView(discord.ui.View):
             )
             return
 
-        # Delete the language selection message immediately
-        try:
-            await interaction.response.defer(ephemeral=True)
-            await self.original_interaction.delete_original_response()
-        except Exception:
-            pass
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(
+            content=TRANSLATIONS[lang]["lang_selected"],
+            view=self
+        )
 
         confirm_view = ConfirmView(
             self.original_interaction.user,
