@@ -15,7 +15,18 @@ from discord import app_commands
 from discord.ext import commands
 from github import Github, GithubException
 
+# NEW: PostgreSQL support for persistent config on Railway
+try:
+    import asyncpg
+    HAS_ASYNCPG = True
+except ImportError:
+    HAS_ASYNCPG = False
+
 from netflix_checker import check_cookie_file
+
+# ╔══════════════════════════════════════════════════════════════╗
+# ║                      CONFIGURATION                          ║
+# ╚══════════════════════════════════════════════════════════════╝
 
 COOKIES_FOLDER         = Path("cookies")
 SCRIPT_TIMEOUT         = 30
@@ -51,6 +62,13 @@ if DEFAULT_CHANNEL_ID:
     logging.info(f"✅ DEFAULT_CHANNEL_ID loaded from env: {DEFAULT_CHANNEL_ID}")
 else:
     logging.warning("⚠️ DEFAULT_CHANNEL_ID not set – /channel command required after restart")
+
+# NEW: PostgreSQL URL (Railway injects this automatically as DATABASE_URL)
+DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
+if DATABASE_URL:
+    logging.info("✅ DATABASE_URL found – persistent PostgreSQL config enabled")
+else:
+    logging.warning("⚠️ DATABASE_URL not set – config will NOT persist across Railway restarts")
 
 # ────────────────────────────────────────────────────────────────
 # Parse GitHub repo and file path from REMOTE_LOG_URL_D
@@ -454,71 +472,134 @@ def get_user_lang(interaction: discord.Interaction) -> str:
 
 # ╔══════════════════════════════════════════════════════════════╗
 # ║                      CONFIG MANAGER                         ║
-# ║  UPDATED: per-guild storage + DEFAULT_CHANNEL_ID fallback   ║
+# ║  FIXED: PostgreSQL-backed persistence (survives Railway      ║
+# ║  restarts) + DEFAULT_CHANNEL_ID env fallback                ║
 # ╚══════════════════════════════════════════════════════════════╝
 class Config:
     def __init__(self) -> None:
-        # UPDATED: guilds dict maps str(guild_id) → channel_id
+        # In-memory cache: str(guild_id) → channel_id
         self.guilds: dict[str, int] = {}
-        # FIXED: legacy single-channel fallback (kept for migration)
+        # Legacy single-channel attr kept for compatibility
         self.allowed_channel_id: int | None = None
-        self.load()
+        # PostgreSQL connection pool (set during bot startup)
+        self._db_pool = None
 
-    def load(self) -> None:
+    # ── PostgreSQL helpers ─────────────────────────────────────────
+
+    async def init_db(self) -> None:
         """
-        UPDATED: Load config from config.json.
-        Supports new per-guild structure AND old flat structure for migration.
-        Falls back to DEFAULT_CHANNEL_ID env var if file is missing/empty.
+        NEW: Called once in on_ready().
+        Creates the guild_config table if it doesn't exist,
+        then loads all rows into the in-memory cache.
+        Falls back silently if DATABASE_URL is not set.
         """
-        if CONFIG_FILE.exists():
-            try:
-                with open(CONFIG_FILE, "r") as f:
-                    data = json.load(f)
+        if not DATABASE_URL or not HAS_ASYNCPG:
+            log.warning("⚠️ PostgreSQL unavailable – using file/env fallback only")
+            self._load_from_file()
+            return
 
-                # NEW: load per-guild structure
-                if "guilds" in data and isinstance(data["guilds"], dict):
-                    self.guilds = {str(k): int(v) for k, v in data["guilds"].items()}
-                    log.info(f"✅ Config loaded – guild channel mappings: {self.guilds}")
+        try:
+            # Railway's DATABASE_URL starts with postgres:// but asyncpg needs postgresql://
+            dsn = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+            self._db_pool = await asyncpg.create_pool(dsn, min_size=1, max_size=3)
 
-                # FIXED: migrate old flat structure into per-guild dict
-                elif "allowed_channel_id" in data and data["allowed_channel_id"]:
-                    old_ch = int(data["allowed_channel_id"])
-                    self.allowed_channel_id = old_ch
-                    log.warning("⚠️ Old config format detected – migrated to per-guild structure")
+            async with self._db_pool.acquire() as conn:
+                await conn.execute("""
+                    CREATE TABLE IF NOT EXISTS guild_config (
+                        guild_id  TEXT PRIMARY KEY,
+                        channel_id BIGINT NOT NULL
+                    )
+                """)
+                rows = await conn.fetch("SELECT guild_id, channel_id FROM guild_config")
+                for row in rows:
+                    self.guilds[row["guild_id"]] = int(row["channel_id"])
 
-            except Exception as e:
-                log.error(f"❌ Failed to load config: {e}")
-        else:
-            log.warning("⚠️ config.json not found (ephemeral storage?) – using DEFAULT_CHANNEL_ID fallback")
+            log.info(f"✅ PostgreSQL config loaded – {len(self.guilds)} guild(s): {self.guilds}")
+        except Exception as e:
+            log.error(f"❌ PostgreSQL init failed: {e} – falling back to file/env")
+            self._db_pool = None
+            self._load_from_file()
 
-    def save(self) -> None:
-        """UPDATED: Save per-guild structure to config.json."""
+    async def _save_to_db(self, guild_id: str, channel_id: int) -> None:
+        """NEW: Upsert a guild→channel mapping into PostgreSQL."""
+        if not self._db_pool:
+            return
+        try:
+            async with self._db_pool.acquire() as conn:
+                await conn.execute("""
+                    INSERT INTO guild_config (guild_id, channel_id)
+                    VALUES ($1, $2)
+                    ON CONFLICT (guild_id) DO UPDATE SET channel_id = EXCLUDED.channel_id
+                """, guild_id, channel_id)
+            log.info(f"✅ Saved to PostgreSQL: guild {guild_id} → channel {channel_id}")
+        except Exception as e:
+            log.error(f"❌ PostgreSQL save failed: {e}")
+
+    # ── File fallback (used when no DB available) ──────────────────
+
+    def _load_from_file(self) -> None:
+        """
+        FIXED: Load from config.json as a fallback.
+        Handles both new per-guild and old flat formats.
+        Does NOT crash if file is missing (Railway ephemeral storage).
+        """
+        if not CONFIG_FILE.exists():
+            log.warning("⚠️ config.json not found – only DEFAULT_CHANNEL_ID env will be used")
+            return
+        try:
+            with open(CONFIG_FILE, "r") as f:
+                data = json.load(f)
+            if "guilds" in data and isinstance(data["guilds"], dict):
+                self.guilds = {str(k): int(v) for k, v in data["guilds"].items()}
+                log.info(f"✅ config.json loaded – guilds: {self.guilds}")
+            elif "allowed_channel_id" in data and data["allowed_channel_id"]:
+                self.allowed_channel_id = int(data["allowed_channel_id"])
+                log.warning("⚠️ Old config.json format – using legacy allowed_channel_id")
+        except Exception as e:
+            log.error(f"❌ Failed to read config.json: {e}")
+
+    def _save_to_file(self) -> None:
+        """Save current guilds dict to config.json (best-effort on Railway)."""
         try:
             with open(CONFIG_FILE, "w") as f:
                 json.dump({"guilds": self.guilds}, f, indent=2)
         except Exception as e:
-            log.error(f"❌ Failed to save config: {e}")
+            log.warning(f"⚠️ Could not save config.json (ephemeral storage?): {e}")
 
-    # NEW: per-guild channel getter with DEFAULT_CHANNEL_ID fallback
+    # ── Public API ─────────────────────────────────────────────────
+
     def get_channel_for_guild(self, guild_id: int) -> int | None:
         """
         Return the configured channel for the given guild.
-        Priority: 1) per-guild config  2) legacy flat config  3) DEFAULT_CHANNEL_ID env
+        Priority:
+          1) In-memory cache (loaded from PostgreSQL or file at startup)
+          2) Legacy flat allowed_channel_id (migration)
+          3) DEFAULT_CHANNEL_ID environment variable (always reliable on Railway)
         """
         guild_key = str(guild_id)
         if guild_key in self.guilds:
             return self.guilds[guild_key]
-        # Legacy migration fallback
         if self.allowed_channel_id:
             return self.allowed_channel_id
-        # NEW: Railway env fallback – no restart needed
+        # NEW: env-based fallback — always works even after Railway restart
         return DEFAULT_CHANNEL_ID
 
-    # UPDATED: store per guild
-    def set_allowed_channel(self, guild_id: int, channel_id: int) -> None:
-        self.guilds[str(guild_id)] = channel_id
-        self.allowed_channel_id = channel_id  # keep legacy attr in sync
-        self.save()
+    async def set_allowed_channel(self, guild_id: int, channel_id: int) -> None:
+        """
+        FIXED: Now async — saves to PostgreSQL first (persistent),
+        then file (best-effort), then updates in-memory cache.
+        """
+        guild_key = str(guild_id)
+        self.guilds[guild_key] = channel_id
+        self.allowed_channel_id = channel_id  # legacy compat
+
+        # 1. Save to PostgreSQL (survives Railway restarts)
+        await self._save_to_db(guild_key, channel_id)
+
+        # 2. Save to file (best-effort, may not survive restart on Railway)
+        self._save_to_file()
+
+        log.info(f"✅ Channel set: guild {guild_id} → channel {channel_id}")
 
 
 config = Config()
@@ -769,9 +850,9 @@ async def set_channel(interaction: discord.Interaction, channel: discord.TextCha
         await interaction.response.send_message(msg, ephemeral=True)
         return
 
-    # UPDATED: store channel per guild
+    # UPDATED: store channel per guild (now async → saves to PostgreSQL)
     guild_id = interaction.guild.id
-    config.set_allowed_channel(guild_id, channel.id)
+    await config.set_allowed_channel(guild_id, channel.id)
 
     lang = get_user_lang(interaction)
     success_msg = f"✅ Bot will now **only** respond in {channel.mention}." if lang == "en" else f"✅ البوت سيعمل الآن **فقط** في {channel.mention}."
@@ -835,6 +916,10 @@ async def on_ready() -> None:
     # UPDATED: log all allowed guilds
     log.info(f"🏠 Allowed guilds: {ALLOWED_GUILD_IDS}")
     log.info(f"📂 Cookies folder: {COOKIES_FOLDER.resolve()}")
+
+    # NEW: Initialize persistent config (PostgreSQL or file fallback)
+    await config.init_db()
+
     # NEW: log channel config state on startup
     for gid in ALLOWED_GUILD_IDS:
         ch = config.get_channel_for_guild(gid)
