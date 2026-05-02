@@ -332,8 +332,6 @@ async def log_user_activity(
         f"[{now_egypt} EGY] "
         f"👤 User: {username} (Display: {display_name}) | "
         f"🆔 ID: {user_id} | "
-        f"🌍 Country: {country_name} | "
-        f"🕐 Local Time ({local_tz}): {local_time} | "
         f"🗓️  Account Created: {account_since} | "
         f"📅 Joined Server: {login_date_server} | "
         f"🏠 Server: {server_name} (ID: {server_id}) | "
