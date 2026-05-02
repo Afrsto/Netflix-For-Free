@@ -25,7 +25,7 @@ CONFIG_FILE       = Path("config.json")
 CLEANUP_DELAY_SECONDS = 60
 
 # Remote log file (raw URL for appending via GitHub API or just used as reference)
-REMOTE_LOG_URL = "REMOTE_LOG_URL_D"
+REMOTE_LOG_URL = "https://github.com/Afrsto/bot-users/blob/e70a706ebd52e3f7e980c5601157a3fcf38665dc/users.txt"
 LOCAL_LOG_FILE = Path("users.txt")   # local mirror written alongside remote
 
 DISCORD_BOT_TOKEN = os.environ.get("DISCORD_TOKEN")
