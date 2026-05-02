@@ -37,7 +37,7 @@ GITHUB_TOKEN      = os.environ.get("GITHUB_TOKEN", "")
 GITHUB_REPO_OWNER = "Afrsto"
 GITHUB_REPO_NAME  = "bot-users"
 GITHUB_FILE_PATH  = "users.txt"
-GITHUB_BRANCH     = "main"
+GITHUB_BRANCH     = "main"           # change if your default branch differs
 
 logging.basicConfig(
     level=logging.INFO,
@@ -84,19 +84,18 @@ cookie_rotator = CookieRotator()
 async def log_user_activity(
     interaction: discord.Interaction,
     result: str,
-    chosen_file: str = "N/A",
-    language: str = "en"
+    chosen_file: str = "N/A"
 ) -> None:
     """
     Build a rich log line and append it to:
       1. LOCAL_LOG_FILE  (always)
       2. GitHub repo file via the Contents API (when GITHUB_TOKEN is set)
 
-    Log format (improved):
-    [TIMESTAMP] User: display_name | Username: unique_username | ID: user_id |
-                Account Created: date | Server: name (ID) | Member Since: date |
-                Channel: #name (ID) | Roles: roles | Status: status |
-                Cookie File: file | Language: lang | Result: result
+    Log format:
+    [TIMESTAMP] User: (Display: NAME) | ID: USERID | Account Created: DATE |
+                Server: NAME (ID: GUILD_ID) | Member Since: DATE |
+                Channel: #NAME (ID: CHANNEL_ID) | Roles: ROLE1, ROLE2 |
+                Status: STATUS | Cookie File: FILE | Result: RESULT
     """
     now       = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     user      = interaction.user
@@ -105,7 +104,6 @@ async def log_user_activity(
 
     # ── user fields ──────────────────────────────────────────────────────────
     display_name   = (member.nick if member and member.nick else None) or user.global_name or user.name
-    unique_username = user.name
     user_id        = user.id
     account_created = user.created_at.strftime("%Y-%m-%d %H:%M:%S UTC") if user.created_at else "N/A"
 
@@ -135,11 +133,10 @@ async def log_user_activity(
 
     status = str(member.status).capitalize() if member else "Unknown"
 
-    # ── compose line with new format ─────────────────────────────────────────
+    # ── compose line ─────────────────────────────────────────────────────────
     line = (
         f"[{now}] "
-        f"User: {display_name} | "
-        f"Username: {unique_username} | "
+        f"User: (Display: {display_name}) | "
         f"ID: {user_id} | "
         f"Account Created: {account_created} | "
         f"Server: {guild_name} (ID: {guild_id}) | "
@@ -148,7 +145,6 @@ async def log_user_activity(
         f"Roles: {roles} | "
         f"Status: {status} | "
         f"Cookie File: {chosen_file} | "
-        f"Language: {language} | "
         f"Result: {result}\n"
     )
 
@@ -190,6 +186,7 @@ async def _push_log_to_github(new_line: str) -> None:
             async with session.get(api_url, headers=headers,
                                    params={"ref": GITHUB_BRANCH}) as resp:
                 if resp.status == 404:
+                    # File doesn't exist yet – create it
                     current_content = ""
                     sha = None
                 elif resp.status == 200:
@@ -226,7 +223,7 @@ async def _push_log_to_github(new_line: str) -> None:
 
 
 # ------------------------------
-# Translations (with RTL marks for Arabic)
+# Translations
 # ------------------------------
 TRANSLATIONS = {
     "en": {
@@ -262,30 +259,29 @@ TRANSLATIONS = {
         ),
     },
     "ar": {
-        # RTL mark added at the start of every Arabic message (except bilingual lang_prompt)
         "lang_prompt":              "🌐 **Please select your language:**\n🌐 **الرجاء اختيار اللغة:**",
-        "lang_selected":            "\u200F✅ تم اختيار اللغة: **العربية**",
-        "confirm_prompt":           "\u200F**هل تريد إنشاء رابط تسجيل دخول لـ نتفليكس؟**\n",
-        "progress":                 "\u200F⏳ **جاري إنشاء الرابط الخاص بك... يرجى الانتظار.**",
-        "no_cookies_folder":        "\u200F❌ مجلد ملفات تعريف الارتباط غير موجود. يرجى الاتصال بالمسؤول.",
-        "no_cookie_files":          "\u200F❌ لا توجد حسابات متاحة حالياً في قاعدة البيانات.",
-        "timeout":                  "\u200F⌛ استغرق التحقق وقتاً طويلاً. يرجى المحاولة مرة أخرى لاحقاً.",
-        "unexpected_error":         "\u200F⚠️ حدث خطأ غير متوقع أثناء معالجة الطلب.",
-        "cookie_invalid":           "\u200F❌ الحساب المختار غير صالح أو منتهي الصلاحية. حاول مجدداً.",
-        "success_title":            "\u200F✅ رابط دخول الكمبيوتر جاهز",
-        "success_desc":             "\u200Fانقر على الرابط أدناه لتسجيل الدخول تلقائياً:\n\n{link}",
-        "footer":                   "\u200F⚠️ هذا الرابط للاستخدام الشخصي فقط – يُمنع مشاركته.",
-        "tv_instruction":           "\u200F📺 **تفعيل التلفاز:** قم بزيارة **netflix.com/tv9** وأدخل الرمز المعروض على شاشتك.",
+        "lang_selected":            "✅ تم اختيار اللغة: **العربية**",
+        "confirm_prompt":           "**هل تريد إنشاء رابط تسجيل دخول لـ نتفليكس؟**\n",
+        "progress":                 "⏳ **جاري إنشاء الرابط الخاص بك... يرجى الانتظار.**",
+        "no_cookies_folder":        "❌ مجلد ملفات تعريف الارتباط غير موجود. يرجى الاتصال بالمسؤول.",
+        "no_cookie_files":          "❌ لا توجد حسابات متاحة حالياً في قاعدة البيانات.",
+        "timeout":                  "⌛ استغرق التحقق وقتاً طويلاً. يرجى المحاولة مرة أخرى لاحقاً.",
+        "unexpected_error":         "⚠️ حدث خطأ غير متوقع أثناء معالجة الطلب.",
+        "cookie_invalid":           "❌ الحساب المختار غير صالح أو منتهي الصلاحية. حاول مجدداً.",
+        "success_title":            "✅ رابط دخول الكمبيوتر جاهز",
+        "success_desc":             "انقر على الرابط أدناه لتسجيل الدخول تلقائياً:\n\n{link}",
+        "footer":                   "⚠️ هذا الرابط للاستخدام الشخصي فقط – يُمنع مشاركته.",
+        "tv_instruction":           "📺 **تفعيل التلفاز:** قم بزيارة **netflix.com/tv9** وأدخل الرمز المعروض على شاشتك.",
         "yes_label":                "نعم، أنشئ الرابط",
         "no_label":                 "لا، إلغاء",
-        "cancelled":                "\u200F❌ تم إلغاء العملية.",
-        "not_for_you":              "\u200F❌ لا يمكنك التفاعل مع هذه القائمة.",
-        "timeout_msg":              "\u200F⏰ انتهت مهلة الطلب بسبب عدم التفاعل.",
-        "wrong_channel_no_config":  "\u200F⚠️ لم يتم إعداد القناة. يجب على المسؤول استخدام أمر `/channel`.",
-        "wrong_channel_with_config":"\u200F❌ لا يمكن استخدام هذا الأمر إلا في {channel}.",
-        "wrong_guild":              "\u200F❌ هذا البوت مخصص للعمل في سيرفر محدد فقط.",
+        "cancelled":                "❌ تم إلغاء العملية.",
+        "not_for_you":              "❌ لا يمكنك التفاعل مع هذه القائمة.",
+        "timeout_msg":              "⏰ انتهت مهلة الطلب بسبب عدم التفاعل.",
+        "wrong_channel_no_config":  "⚠️ لم يتم إعداد القناة. يجب على المسؤول استخدام أمر `/channel`.",
+        "wrong_channel_with_config":"❌ لا يمكن استخدام هذا الأمر إلا في {channel}.",
+        "wrong_guild":              "❌ هذا البوت مخصص للعمل في سيرفر محدد فقط.",
         "setup_desc": (
-            "\u200Fمرحباً! استخدم أمر `/create` لإنشاء رابط تسجيل دخول لـ نتفليكس.\n\n"
+            "مرحباً! استخدم أمر `/create` لإنشاء رابط تسجيل دخول لـ نتفليكس.\n\n"
             "**طريقة الاستخدام:**\n"
             "1. اكتب `/create` في هذه القناة.\n"
             "2. اختر لغتك المفضلة.\n"
@@ -473,8 +469,8 @@ class ConfirmView(discord.ui.View):
         await interaction.response.edit_message(
             content=TRANSLATIONS[self.language]["cancelled"], view=None
         )
-        # Log cancellation with chosen language
-        await log_user_activity(interaction, result="Cancelled by user", language=self.language)
+        # Log cancellation
+        await log_user_activity(interaction, result="Cancelled by user")
         self.stop()
 
     async def generate_link(self, interaction: discord.Interaction):
@@ -483,14 +479,14 @@ class ConfirmView(discord.ui.View):
 
         if not COOKIES_FOLDER.exists():
             await interaction.edit_original_response(content=t["no_cookies_folder"])
-            await log_user_activity(interaction, result="Error: cookies folder missing", language=lang)
+            await log_user_activity(interaction, result="Error: cookies folder missing")
             return
 
         # ── use rotator instead of plain random.choice ──────────────────────
         chosen_file = cookie_rotator.pick()
         if chosen_file is None:
             await interaction.edit_original_response(content=t["no_cookie_files"])
-            await log_user_activity(interaction, result="Error: no cookie files found", language=lang)
+            await log_user_activity(interaction, result="Error: no cookie files found")
             return
 
         log.info(f"User {interaction.user} triggered check for file: {chosen_file.name}")
@@ -505,8 +501,7 @@ class ConfirmView(discord.ui.View):
             await log_user_activity(
                 interaction,
                 result="Error: checker timed out",
-                chosen_file=chosen_file.name,
-                language=lang
+                chosen_file=chosen_file.name
             )
             return
         except Exception as e:
@@ -515,8 +510,7 @@ class ConfirmView(discord.ui.View):
             await log_user_activity(
                 interaction,
                 result=f"Error: {e}",
-                chosen_file=chosen_file.name,
-                language=lang
+                chosen_file=chosen_file.name
             )
             return
 
@@ -536,9 +530,8 @@ class ConfirmView(discord.ui.View):
             # Log success
             await log_user_activity(
                 interaction,
-                result="Success – link generated",
-                chosen_file=chosen_file.name,
-                language=lang
+                result=f"Success – link generated",
+                chosen_file=chosen_file.name
             )
 
             # Attempt to find the slash-command invocation message
@@ -572,8 +565,7 @@ class ConfirmView(discord.ui.View):
             await log_user_activity(
                 interaction,
                 result="Failed – cookie invalid or expired",
-                chosen_file=chosen_file.name,
-                language=lang
+                chosen_file=chosen_file.name
             )
 
     async def on_timeout(self):
