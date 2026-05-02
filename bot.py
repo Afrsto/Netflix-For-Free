@@ -31,41 +31,34 @@ DISCORD_BOT_TOKEN = os.environ.get("DISCORD_TOKEN")
 GITHUB_TOKEN      = os.environ.get("GITHUB_TOKEN")
 REMOTE_LOG_URL    = os.environ.get("REMOTE_LOG_URL")
 
-# ────────────────────────────────────────────────────────────────
-# NEW: Support multiple guild IDs from environment variables
-# Reads all variables starting with "GUILD_ID_" and also optionally
-# a single "GUILD_ID" for backward compatibility.
-# ────────────────────────────────────────────────────────────────
+# NEW: Support multiple guilds via GUILD_ID_1, GUILD_ID_2, GUILD_ID_3, ...
 ALLOWED_GUILD_IDS: list[int] = []
-
-# Helper to parse and validate guild IDs
-def _add_guild_id(value: str) -> None:
-    if value and value.isdigit():
-        gid = int(value)
-        if gid not in ALLOWED_GUILD_IDS:
-            ALLOWED_GUILD_IDS.append(gid)
-            logging.info(f"✅ Allowed guild ID loaded: {gid}")
-    else:
-        logging.warning(f"⚠️ Invalid GUILD_ID value ignored: {value}")
-
-# Check for single legacy GUILD_ID
-legacy_guild = os.environ.get("GUILD_ID")
-if legacy_guild:
-    _add_guild_id(legacy_guild)
-
-# Check for all GUILD_ID_1, GUILD_ID_2, ... variables
 for key, value in os.environ.items():
-    if key.startswith("GUILD_ID_") and key != "GUILD_ID":  # avoid double counting
-        _add_guild_id(value)
+    if key.startswith("GUILD_ID_") and value and value.strip().isdigit():
+        ALLOWED_GUILD_IDS.append(int(value.strip()))
+
+# UPDATED: Also support legacy GUILD_ID for backwards compatibility
+_legacy_guild = os.environ.get("GUILD_ID", "").strip()
+if _legacy_guild.isdigit() and int(_legacy_guild) not in ALLOWED_GUILD_IDS:
+    ALLOWED_GUILD_IDS.append(int(_legacy_guild))
 
 if not ALLOWED_GUILD_IDS:
-    raise ValueError("❌ No valid GUILD_ID or GUILD_ID_* environment variables found. Bot cannot start.")
+    raise ValueError("❌ No valid GUILD_ID_1 / GUILD_ID_2 / ... environment variables found")
 
 if not DISCORD_BOT_TOKEN:
     raise ValueError("❌ Missing DISCORD_TOKEN environment variable")
 
+# NEW: Default channel ID fallback for Railway (avoids needing /channel after restart)
+_default_ch = os.environ.get("DEFAULT_CHANNEL_ID", "").strip()
+DEFAULT_CHANNEL_ID: int | None = int(_default_ch) if _default_ch.isdigit() else None
+if DEFAULT_CHANNEL_ID:
+    logging.info(f"✅ DEFAULT_CHANNEL_ID loaded from env: {DEFAULT_CHANNEL_ID}")
+else:
+    logging.warning("⚠️ DEFAULT_CHANNEL_ID not set – /channel command required after restart")
+
 # ────────────────────────────────────────────────────────────────
-# Parse GitHub repo and file path from REMOTE_LOG_URL
+# Parse GitHub repo and file path from REMOTE_LOG_URL_D
+#REMOTE_LOG_URL = Example URL: https://github.com/Afrsto/bot-users/blob/main/users.txt
 # ────────────────────────────────────────────────────────────────
 GITHUB_REPO = None
 GITHUB_FILE_PATH = None
@@ -82,12 +75,12 @@ if REMOTE_LOG_URL:
                     GITHUB_FILE_PATH = "/".join(path_parts[idx+2:])
                     GITHUB_REPO = owner_repo
     if not GITHUB_REPO:
-        logging.warning("⚠️ Could not parse REMOTE_LOG_URL, GitHub logging disabled.")
+        logging.warning("⚠️ Could not parse REMOTE_LOG_URL_D, GitHub logging disabled.")
 else:
-    logging.warning("⚠️ REMOTE_LOG_URL not set, GitHub logging disabled.")
+    logging.warning("⚠️ REMOTE_LOG_URL_D not set, GitHub logging disabled.")
 
 # ────────────────────────────────────────────────────────────────
-# Locale → Country name + timezone mapping (unchanged)
+# Locale → Country name + timezone mapping
 # ────────────────────────────────────────────────────────────────
 LOCALE_TO_COUNTRY: dict[str, str] = {
     "ar": "Arab Region", "ar-AE": "UAE", "ar-BH": "Bahrain",
@@ -255,7 +248,7 @@ def get_github_repo():
 
 
 def update_users_txt_on_github(new_line: str) -> None:
-    """Append a line to the remote users.txt file defined by REMOTE_LOG_URL."""
+    """Append a line to the remote users.txt file defined by REMOTE_LOG_URL_D."""
     if not GITHUB_REPO or not GITHUB_FILE_PATH:
         log.debug("GitHub logging disabled – missing repo or file path.")
         return
@@ -465,43 +458,70 @@ def get_user_lang(interaction: discord.Interaction) -> str:
 
 # ╔══════════════════════════════════════════════════════════════╗
 # ║                      CONFIG MANAGER                         ║
+# ║  UPDATED: per-guild storage + DEFAULT_CHANNEL_ID fallback   ║
 # ╚══════════════════════════════════════════════════════════════╝
 class Config:
     def __init__(self) -> None:
+        # UPDATED: guilds dict maps str(guild_id) → channel_id
+        self.guilds: dict[str, int] = {}
+        # FIXED: legacy single-channel fallback (kept for migration)
         self.allowed_channel_id: int | None = None
         self.load()
 
     def load(self) -> None:
-        """Load config from file, with error resilience."""
+        """
+        UPDATED: Load config from config.json.
+        Supports new per-guild structure AND old flat structure for migration.
+        Falls back to DEFAULT_CHANNEL_ID env var if file is missing/empty.
+        """
         if CONFIG_FILE.exists():
             try:
-                with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                with open(CONFIG_FILE, "r") as f:
                     data = json.load(f)
-                    # UPDATED: ensure we convert to int if loaded as string (legacy)
-                    channel_id = data.get("allowed_channel_id")
-                    if channel_id is not None:
-                        self.allowed_channel_id = int(channel_id)
-                        log.info(f"📂 Loaded allowed channel ID from config: {self.allowed_channel_id}")
-            except json.JSONDecodeError as e:
-                log.error(f"❌ Config file corrupted (JSON error): {e} – will overwrite on next save.")
+
+                # NEW: load per-guild structure
+                if "guilds" in data and isinstance(data["guilds"], dict):
+                    self.guilds = {str(k): int(v) for k, v in data["guilds"].items()}
+                    log.info(f"✅ Config loaded – guild channel mappings: {self.guilds}")
+
+                # FIXED: migrate old flat structure into per-guild dict
+                elif "allowed_channel_id" in data and data["allowed_channel_id"]:
+                    old_ch = int(data["allowed_channel_id"])
+                    self.allowed_channel_id = old_ch
+                    log.warning("⚠️ Old config format detected – migrated to per-guild structure")
+
             except Exception as e:
                 log.error(f"❌ Failed to load config: {e}")
         else:
-            log.info("📂 No config.json found – starting fresh.")
+            log.warning("⚠️ config.json not found (ephemeral storage?) – using DEFAULT_CHANNEL_ID fallback")
 
     def save(self) -> None:
-        """Save config to file, creating directory if needed."""
+        """UPDATED: Save per-guild structure to config.json."""
         try:
-            # Ensure parent directory exists (though config is in current dir)
-            CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
-            with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-                json.dump({"allowed_channel_id": self.allowed_channel_id}, f, indent=2)
-            log.info(f"💾 Saved allowed channel ID: {self.allowed_channel_id}")
+            with open(CONFIG_FILE, "w") as f:
+                json.dump({"guilds": self.guilds}, f, indent=2)
         except Exception as e:
             log.error(f"❌ Failed to save config: {e}")
 
-    def set_allowed_channel(self, channel_id: int) -> None:
-        self.allowed_channel_id = channel_id
+    # NEW: per-guild channel getter with DEFAULT_CHANNEL_ID fallback
+    def get_channel_for_guild(self, guild_id: int) -> int | None:
+        """
+        Return the configured channel for the given guild.
+        Priority: 1) per-guild config  2) legacy flat config  3) DEFAULT_CHANNEL_ID env
+        """
+        guild_key = str(guild_id)
+        if guild_key in self.guilds:
+            return self.guilds[guild_key]
+        # Legacy migration fallback
+        if self.allowed_channel_id:
+            return self.allowed_channel_id
+        # NEW: Railway env fallback – no restart needed
+        return DEFAULT_CHANNEL_ID
+
+    # UPDATED: store per guild
+    def set_allowed_channel(self, guild_id: int, channel_id: int) -> None:
+        self.guilds[str(guild_id)] = channel_id
+        self.allowed_channel_id = channel_id  # keep legacy attr in sync
         self.save()
 
 
@@ -515,19 +535,23 @@ intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 
+# UPDATED: per-guild channel check with DEFAULT_CHANNEL_ID fallback
 def is_allowed_channel(interaction: discord.Interaction) -> bool:
-    """Check if command is used in the preconfigured channel."""
-    if config.allowed_channel_id is None:
+    guild_id = interaction.guild.id if interaction.guild else None
+    if guild_id is None:
         return False
-    return interaction.channel_id == config.allowed_channel_id
+    channel_id = config.get_channel_for_guild(guild_id)
+    if channel_id is None:
+        return False
+    return interaction.channel_id == channel_id
 
 
 # ╔══════════════════════════════════════════════════════════════╗
 # ║              GLOBAL INTERACTION CHECK (guild guard)         ║
+# ║  UPDATED: checks against ALLOWED_GUILD_IDS list             ║
 # ╚══════════════════════════════════════════════════════════════╝
 async def global_interaction_check(interaction: discord.Interaction) -> bool:
-    """Reject interactions from guilds not in ALLOWED_GUILD_IDS."""
-    # UPDATED: Check multiple guild IDs
+    # UPDATED: multi-guild check
     if interaction.guild is None or interaction.guild.id not in ALLOWED_GUILD_IDS:
         lang = get_user_lang(interaction)
         msg = TRANSLATIONS[lang]["wrong_guild"]
@@ -738,23 +762,21 @@ async def cleanup_messages(
 
 # ╔══════════════════════════════════════════════════════════════╗
 # ║               /channel COMMAND  (Admin only)                ║
+# ║  UPDATED: stores channel per guild ID                       ║
 # ╚══════════════════════════════════════════════════════════════╝
 @bot.tree.command(name="channel", description="📌 Set the text channel where the bot will work (Admin only)")
 @app_commands.default_permissions(administrator=True)
 async def set_channel(interaction: discord.Interaction, channel: discord.TextChannel) -> None:
-    # FIXED: Also check if the guild is allowed (though global check already does, but double-safe)
-    if interaction.guild is None or interaction.guild.id not in ALLOWED_GUILD_IDS:
-        lang = get_user_lang(interaction)
-        await interaction.response.send_message(TRANSLATIONS[lang]["wrong_guild"], ephemeral=True)
-        return
-
     if not interaction.user.guild_permissions.administrator:
         lang = get_user_lang(interaction)
         msg = "❌ You need administrator permissions." if lang == "en" else "❌ تحتاج إلى صلاحيات المسؤول."
         await interaction.response.send_message(msg, ephemeral=True)
         return
 
-    config.set_allowed_channel(channel.id)
+    # UPDATED: store channel per guild
+    guild_id = interaction.guild.id
+    config.set_allowed_channel(guild_id, channel.id)
+
     lang = get_user_lang(interaction)
     success_msg = f"✅ Bot will now **only** respond in {channel.mention}." if lang == "en" else f"✅ البوت سيعمل الآن **فقط** في {channel.mention}."
     await interaction.response.send_message(success_msg, ephemeral=True)
@@ -779,17 +801,25 @@ async def set_channel(interaction: discord.Interaction, channel: discord.TextCha
 
 # ╔══════════════════════════════════════════════════════════════╗
 # ║                /create COMMAND                              ║
+# ║  UPDATED: pre-checks guild + channel before proceeding      ║
 # ╚══════════════════════════════════════════════════════════════╝
 @bot.tree.command(name="create", description="🎬 Generate a Netflix PC login link from a random cookie file")
 async def create(interaction: discord.Interaction) -> None:
     user_lang = get_user_lang(interaction)
 
-    # Guild check is already done globally, but we also need to ensure channel is configured
+    # PRE-CHECK 1: guild must be allowed (NEW)
+    if interaction.guild is None or interaction.guild.id not in ALLOWED_GUILD_IDS:
+        await interaction.response.send_message(TRANSLATIONS[user_lang]["wrong_guild"], ephemeral=True)
+        return
+
+    # PRE-CHECK 2: channel must be configured (UPDATED: uses per-guild lookup)
     if not is_allowed_channel(interaction):
-        if config.allowed_channel_id is None:
+        guild_id = interaction.guild.id
+        channel_id = config.get_channel_for_guild(guild_id)
+        if channel_id is None:
             await interaction.response.send_message(TRANSLATIONS[user_lang]["wrong_channel_no_config"], ephemeral=True)
         else:
-            allowed_channel = bot.get_channel(config.allowed_channel_id)
+            allowed_channel = bot.get_channel(channel_id)
             mention = allowed_channel.mention if allowed_channel else "the designated channel"
             await interaction.response.send_message(TRANSLATIONS[user_lang]["wrong_channel_with_config"].format(channel=mention), ephemeral=True)
         return
@@ -800,13 +830,22 @@ async def create(interaction: discord.Interaction) -> None:
 
 # ╔══════════════════════════════════════════════════════════════╗
 # ║                       BOT EVENTS                            ║
+# ║  UPDATED: multi-guild logging and sync                      ║
 # ╚══════════════════════════════════════════════════════════════╝
 @bot.event
 async def on_ready() -> None:
     log.info("━" * 60)
     log.info(f"🤖 Logged in as : {bot.user}  (ID: {bot.user.id})")
+    # UPDATED: log all allowed guilds
     log.info(f"🏠 Allowed guilds: {ALLOWED_GUILD_IDS}")
     log.info(f"📂 Cookies folder: {COOKIES_FOLDER.resolve()}")
+    # NEW: log channel config state on startup
+    for gid in ALLOWED_GUILD_IDS:
+        ch = config.get_channel_for_guild(gid)
+        if ch:
+            log.info(f"📌 Guild {gid} → channel {ch} (configured)")
+        else:
+            log.warning(f"⚠️ Guild {gid} → no channel configured (set DEFAULT_CHANNEL_ID or run /channel)")
     if GITHUB_REPO and GITHUB_FILE_PATH:
         log.info(f"📡 GitHub log target: {GITHUB_REPO}/{GITHUB_FILE_PATH}")
     else:
@@ -815,13 +854,11 @@ async def on_ready() -> None:
 
     bot.tree.interaction_check = global_interaction_check
 
-    # Sync commands to each allowed guild (or just the first if many? Discord.py limitation)
-    # Best practice: sync to a specific guild for faster updates, but we need to support multiple.
-    # We'll sync to each guild individually.
+    # UPDATED: sync commands to ALL allowed guilds
     for guild_id in ALLOWED_GUILD_IDS:
-        guild = discord.Object(id=guild_id)
+        guild_obj = discord.Object(id=guild_id)
         try:
-            synced = await bot.tree.sync(guild=guild)
+            synced = await bot.tree.sync(guild=guild_obj)
             log.info(f"✅ Synced {len(synced)} slash command(s) to guild {guild_id}")
         except Exception as e:
             log.error(f"❌ Failed to sync commands to guild {guild_id}: {e}")
