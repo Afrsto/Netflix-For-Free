@@ -4,6 +4,7 @@ import json
 import random
 import asyncio
 import logging
+import tempfile
 from pathlib import Path
 from base64 import b64decode
 from datetime import datetime
@@ -15,7 +16,7 @@ from discord import app_commands
 from discord.ext import commands
 from github import Github, GithubException
 
-
+# NEW: PostgreSQL support for persistent config on Railway
 try:
     import asyncpg
     HAS_ASYNCPG = True
@@ -28,7 +29,7 @@ from netflix_checker import check_cookie_file
 # ║                      CONFIGURATION                          ║
 # ╚══════════════════════════════════════════════════════════════╝
 
-COOKIES_FOLDER         = Path("cookies")
+COOKIES_FOLDER         = Path("cookies")   # local fallback (used if GitHub fetch fails)
 SCRIPT_TIMEOUT         = 30
 CONFIG_FILE            = Path("config.json")
 USER_LOG_FILE          = Path("users.txt")     # local fallback (also pushed to GitHub)
@@ -37,6 +38,40 @@ CLEANUP_DELAY_SECONDS  = 60
 DISCORD_BOT_TOKEN = os.environ.get("DISCORD_TOKEN")
 GITHUB_TOKEN      = os.environ.get("GITHUB_TOKEN")
 REMOTE_LOG_URL    = os.environ.get("REMOTE_LOG_URL")
+
+# NEW: GitHub URL for the cookies folder
+# Set COOKIES_REPO_URL in Railway env vars, e.g.:
+#   https://github.com/Afrsto/bot-users/tree/main/cookies
+COOKIES_REPO_URL = os.environ.get(
+    "COOKIES_REPO_URL",
+    "https://github.com/Afrsto/bot-users/tree/main/cookies"   # default hardcoded
+)
+
+# NEW: Parse cookies GitHub repo + path from COOKIES_REPO_URL
+COOKIES_GITHUB_REPO: str | None = None
+COOKIES_GITHUB_PATH: str | None = None
+COOKIES_GITHUB_BRANCH: str = "main"
+
+if COOKIES_REPO_URL:
+    _cp = urlparse(COOKIES_REPO_URL)
+    if _cp.netloc == "github.com":
+        _parts = _cp.path.strip("/").split("/")
+        # format: /owner/repo/tree/branch/path/to/folder
+        if len(_parts) >= 2:
+            COOKIES_GITHUB_REPO = f"{_parts[0]}/{_parts[1]}"
+        if "tree" in _parts:
+            _ti = _parts.index("tree")
+            if _ti + 1 < len(_parts):
+                COOKIES_GITHUB_BRANCH = _parts[_ti + 1]
+            if _ti + 2 < len(_parts):
+                COOKIES_GITHUB_PATH = "/".join(_parts[_ti + 2:])
+            else:
+                COOKIES_GITHUB_PATH = ""   # root of repo
+
+if COOKIES_GITHUB_REPO:
+    logging.info(f"✅ Cookies source: GitHub {COOKIES_GITHUB_REPO}/{COOKIES_GITHUB_PATH} [{COOKIES_GITHUB_BRANCH}]")
+else:
+    logging.warning("⚠️ Could not parse COOKIES_REPO_URL – falling back to local cookies folder")
 
 # NEW: Support multiple guilds via GUILD_ID_1, GUILD_ID_2, GUILD_ID_3, ...
 ALLOWED_GUILD_IDS: list[int] = []
@@ -310,7 +345,104 @@ def update_users_txt_on_github(new_line: str) -> None:
 
 
 # ╔══════════════════════════════════════════════════════════════╗
-# ║                    USER ACTIVITY LOGGER (ASYNC)             ║
+# ║           GITHUB COOKIES FETCHER  (NEW)                     ║
+# ║  Fetches .txt cookie files from the GitHub cookies folder   ║
+# ║  so Railway doesn't need a local cookies/ directory.        ║
+# ╚══════════════════════════════════════════════════════════════╝
+
+# In-memory cache: filename → raw text content
+_github_cookie_cache: dict[str, str] = {}
+
+
+def _get_cookies_repo():
+    """Return the GitHub repo object used for cookie files."""
+    if not GITHUB_TOKEN or not COOKIES_GITHUB_REPO:
+        return None
+    try:
+        g = Github(GITHUB_TOKEN)
+        return g.get_repo(COOKIES_GITHUB_REPO)
+    except GithubException as e:
+        log.error(f"❌ Cannot access cookies repo {COOKIES_GITHUB_REPO}: {e}")
+        return None
+
+
+def fetch_github_cookie_list() -> list[str]:
+    """
+    NEW: Return a list of .txt filenames found in the GitHub cookies folder.
+    Uses PyGitHub to list the folder contents.
+    Falls back to [] on any error.
+    """
+    repo = _get_cookies_repo()
+    if not repo:
+        return []
+    try:
+        folder_path = COOKIES_GITHUB_PATH or ""
+        contents = repo.get_contents(folder_path, ref=COOKIES_GITHUB_BRANCH)
+        txt_files = [
+            c.name for c in contents
+            if c.type == "file" and c.name.endswith(".txt")
+        ]
+        log.info(f"📂 GitHub cookies folder has {len(txt_files)} .txt file(s): {txt_files}")
+        return txt_files
+    except GithubException as e:
+        log.error(f"❌ Failed to list GitHub cookies folder: {e}")
+        return []
+
+
+def fetch_github_cookie_content(filename: str) -> str | None:
+    """
+    NEW: Download and return the raw text content of a single cookie file
+    from the GitHub cookies folder.
+    Returns None on failure.
+    """
+    repo = _get_cookies_repo()
+    if not repo:
+        return None
+    try:
+        folder_path = COOKIES_GITHUB_PATH or ""
+        file_path   = f"{folder_path}/{filename}".lstrip("/")
+        content_obj = repo.get_contents(file_path, ref=COOKIES_GITHUB_BRANCH)
+        raw = b64decode(content_obj.content).decode("utf-8")
+        log.info(f"✅ Downloaded cookie file from GitHub: {filename} ({len(raw)} bytes)")
+        return raw
+    except GithubException as e:
+        log.error(f"❌ Failed to download cookie file {filename}: {e}")
+        return None
+
+
+def pick_github_cookie_file(filenames: list[str]) -> str:
+    """
+    NEW: Round-robin cookie selection over GitHub filenames (strings, not Paths).
+    Mirrors the logic of pick_cookie_file() but works with filename strings.
+    """
+    global _used_cookie_files
+    # Reuse the same _used_cookie_files list but store filenames as fake Paths
+    # Use a separate global for GitHub names to keep things clean.
+    return random.choice(filenames)   # simple random for GitHub files
+
+
+# NEW: separate rotation tracker for GitHub cookie names
+_used_github_cookie_names: list[str] = []
+
+
+def pick_github_cookie_rotation(filenames: list[str]) -> str:
+    """Round-robin selection over GitHub cookie filenames."""
+    global _used_github_cookie_names
+
+    # Remove filenames that no longer exist
+    _used_github_cookie_names = [f for f in _used_github_cookie_names if f in filenames]
+
+    remaining = [f for f in filenames if f not in _used_github_cookie_names]
+    if not remaining:
+        log.info("🔄 All GitHub cookie files used – resetting rotation.")
+        _used_github_cookie_names.clear()
+        remaining = list(filenames)
+
+    chosen = random.choice(remaining)
+    _used_github_cookie_names.append(chosen)
+    log.info(f"🎯 GitHub cookie picked: {chosen}  "
+             f"({len(_used_github_cookie_names)}/{len(filenames)} used this rotation)")
+    return chosen
 # ╚══════════════════════════════════════════════════════════════╝
 async def log_user_activity(
     interaction: discord.Interaction,
@@ -731,31 +863,88 @@ class ConfirmView(discord.ui.View):
         lang = self.language
         t = TRANSLATIONS[lang]
 
-        if not COOKIES_FOLDER.exists():
-            await interaction.edit_original_response(content=t["no_cookies_folder"])
-            await log_user_activity(interaction, "Error", "Cookies folder missing", language=self.language)
+        # ── NEW: Try GitHub cookies first, fall back to local folder ──────
+        chosen_file_name: str | None = None
+        cookie_content:   str | None = None
+        tmp_path:         str | None = None   # temp file path passed to checker
+
+        if COOKIES_GITHUB_REPO and COOKIES_GITHUB_PATH is not None:
+            # Fetch list of .txt files from GitHub (blocking → run in thread)
+            github_names = await asyncio.to_thread(fetch_github_cookie_list)
+
+            if not github_names:
+                log.warning("⚠️ No .txt files in GitHub cookies folder – trying local fallback")
+            else:
+                chosen_file_name = await asyncio.to_thread(
+                    pick_github_cookie_rotation, github_names
+                )
+                cookie_content = await asyncio.to_thread(
+                    fetch_github_cookie_content, chosen_file_name
+                )
+                if cookie_content is None:
+                    log.warning(f"⚠️ Could not download {chosen_file_name} – trying local fallback")
+                    chosen_file_name = None
+
+        # ── LOCAL FALLBACK: use local cookies/ folder if GitHub failed ────
+        if cookie_content is None:
+            if not COOKIES_FOLDER.exists():
+                await interaction.edit_original_response(content=t["no_cookies_folder"])
+                await log_user_activity(interaction, "Error", "Cookies folder missing", language=self.language)
+                return
+
+            txt_files = list(COOKIES_FOLDER.glob("*.txt"))
+            if not txt_files:
+                await interaction.edit_original_response(content=t["no_cookie_files"])
+                await log_user_activity(interaction, "Error", "No cookie files found", language=self.language)
+                return
+
+            chosen_path = pick_cookie_file(txt_files)
+            chosen_file_name = chosen_path.name
+            log.info(f"📂 Using local cookie file: {chosen_file_name}")
+
+            # Write to temp file for checker
+            try:
+                cookie_content = chosen_path.read_text(encoding="utf-8")
+            except Exception as e:
+                log.error(f"❌ Failed to read local cookie file: {e}")
+                await interaction.edit_original_response(content=t["unexpected_error"])
+                return
+
+        # ── Write content to a temp file so check_cookie_file can read it ─
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w", suffix=".txt", delete=False, encoding="utf-8"
+            ) as tmp:
+                tmp.write(cookie_content)
+                tmp_path = tmp.name
+        except Exception as e:
+            log.error(f"❌ Failed to write temp cookie file: {e}")
+            await interaction.edit_original_response(content=t["unexpected_error"])
             return
 
-        txt_files = list(COOKIES_FOLDER.glob("*.txt"))
-        if not txt_files:
-            await interaction.edit_original_response(content=t["no_cookie_files"])
-            await log_user_activity(interaction, "Error", "No cookie files found", language=self.language)
-            return
-
-        chosen_file = pick_cookie_file(txt_files)
-        log.info(f"🎯 {interaction.user} → checking file: {chosen_file.name}")
+        log.info(f"🎯 {interaction.user} → checking cookie: {chosen_file_name}")
 
         try:
-            result = await asyncio.wait_for(asyncio.to_thread(check_cookie_file, str(chosen_file)), timeout=SCRIPT_TIMEOUT)
+            result = await asyncio.wait_for(
+                asyncio.to_thread(check_cookie_file, tmp_path),
+                timeout=SCRIPT_TIMEOUT
+            )
         except asyncio.TimeoutError:
             await interaction.edit_original_response(content=t["timeout"])
-            await log_user_activity(interaction, "Timeout", "Cookie validation timeout", used_txt_files=[chosen_file.name], language=self.language)
+            await log_user_activity(interaction, "Timeout", "Cookie validation timeout", used_txt_files=[chosen_file_name], language=self.language)
             return
         except Exception as e:
             log.error(f"❌ Checker error: {e}")
             await interaction.edit_original_response(content=t["unexpected_error"])
-            await log_user_activity(interaction, "Error", f"Exception: {str(e)[:80]}", used_txt_files=[chosen_file.name], language=self.language)
+            await log_user_activity(interaction, "Error", f"Exception: {str(e)[:80]}", used_txt_files=[chosen_file_name], language=self.language)
             return
+        finally:
+            # ALWAYS clean up the temp file
+            if tmp_path:
+                try:
+                    os.unlink(tmp_path)
+                except Exception:
+                    pass
 
         if result:
             user = interaction.user
@@ -801,10 +990,10 @@ class ConfirmView(discord.ui.View):
             ))
 
             log.info(f"🔗 Link sent to {interaction.user} – cleanup in {CLEANUP_DELAY_SECONDS}s")
-            await log_user_activity(interaction, "✅ Success", "Link generated", used_txt_files=[chosen_file.name], language=self.language)
+            await log_user_activity(interaction, "✅ Success", "Link generated", used_txt_files=[chosen_file_name], language=self.language)
         else:
             await interaction.edit_original_response(content=t["cookie_invalid"])
-            await log_user_activity(interaction, "❌ Failed", "Cookie invalid or expired", used_txt_files=[chosen_file.name], language=self.language)
+            await log_user_activity(interaction, "❌ Failed", "Cookie invalid or expired", used_txt_files=[chosen_file_name], language=self.language)
 
     async def on_timeout(self) -> None:
         for child in self.children:
@@ -915,7 +1104,11 @@ async def on_ready() -> None:
     log.info(f"🤖 Logged in as : {bot.user}  (ID: {bot.user.id})")
     # UPDATED: log all allowed guilds
     log.info(f"🏠 Allowed guilds: {ALLOWED_GUILD_IDS}")
-    log.info(f"📂 Cookies folder: {COOKIES_FOLDER.resolve()}")
+    # NEW: log cookie source
+    if COOKIES_GITHUB_REPO:
+        log.info(f"🍪 Cookie source : GitHub → {COOKIES_GITHUB_REPO}/{COOKIES_GITHUB_PATH} [{COOKIES_GITHUB_BRANCH}]")
+    else:
+        log.info(f"🍪 Cookie source : Local → {COOKIES_FOLDER.resolve()}")
 
     # NEW: Initialize persistent config (PostgreSQL or file fallback)
     await config.init_db()
