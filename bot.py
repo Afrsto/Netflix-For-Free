@@ -24,10 +24,6 @@ except ImportError:
 
 from netflix_checker import check_cookie_file
 
-# ╔══════════════════════════════════════════════════════════════╗
-# ║                      CONFIGURATION                          ║
-# ╚══════════════════════════════════════════════════════════════╝
-
 COOKIES_FOLDER         = Path("cookies")
 SCRIPT_TIMEOUT         = 30
 CONFIG_FILE            = Path("config.json")
