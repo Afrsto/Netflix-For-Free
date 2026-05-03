@@ -40,7 +40,6 @@ REMOTE_LOG_URL    = os.environ.get("REMOTE_LOG_URL")
 
 # GitHub URL for saving/loading guild→channel link configs (survives bot updates)
 # Set CHANNEL_LOG_URL in environment variables, e.g.:
-#   CHANNEL_LOG_URL=https://github.com/<owner>/<repo>/blob/main/logs.txt
 CHANNEL_LOG_URL: str | None = os.environ.get("CHANNEL_LOG_URL", "").strip() or None
 
 # Parse CHANNEL_LOG_URL into repo + file path
@@ -50,7 +49,6 @@ if CHANNEL_LOG_URL:
     _clp = urlparse(CHANNEL_LOG_URL)
     if _clp.netloc == "github.com":
         _cl_parts = _clp.path.strip("/").split("/")
-        # format: /owner/repo/blob/branch/path/to/file
         if len(_cl_parts) >= 2:
             CHANNEL_LOG_GITHUB_REPO = f"{_cl_parts[0]}/{_cl_parts[1]}"
         if "blob" in _cl_parts:
@@ -60,7 +58,6 @@ if CHANNEL_LOG_URL:
 
 # GitHub URL for the cookies folder.
 # Set COOKIES_REPO_UR (or COOKIES_REPO_URL) in environment variables, e.g.:
-#   COOKIES_REPO_UR=https://github.com/<owner>/<repo>/tree/main/cookies
 COOKIES_REPO_URL = (
     os.environ.get("COOKIES_REPO_UR", "").strip()
     or os.environ.get("COOKIES_REPO_URL", "").strip()
@@ -76,7 +73,6 @@ if COOKIES_REPO_URL:
     _cp = urlparse(COOKIES_REPO_URL)
     if _cp.netloc == "github.com":
         _parts = _cp.path.strip("/").split("/")
-        # format: /owner/repo/tree/branch/path/to/folder
         if len(_parts) >= 2:
             COOKIES_GITHUB_REPO = f"{_parts[0]}/{_parts[1]}"
         if "tree" in _parts:
