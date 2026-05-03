@@ -39,32 +39,30 @@ GITHUB_TOKEN      = os.environ.get("GITHUB_TOKEN")
 REMOTE_LOG_URL    = os.environ.get("REMOTE_LOG_URL")
 
 # GitHub URL for saving/loading guild→channel link configs (survives bot updates)
-# Set CHANNEL_LOG_URL in environment variables, e.g.:
-#   CHANNEL_LOG_URL=https://github.com/<owner>/<repo>/blob/main/logs.txt
-CHANNEL_LOG_URL: str | None = os.environ.get("CHANNEL_LOG_URL", "").strip() or None
+# This is the logs.txt file used to persist /channel command mappings
+#   https://github.com/Afrsto/bot-users/blob/main/logs.txt
+CHANNEL_LOG_URL = "https://github.com/Afrsto/bot-users/blob/main/logs.txt"
 
 # Parse CHANNEL_LOG_URL into repo + file path
 CHANNEL_LOG_GITHUB_REPO: str | None = None
 CHANNEL_LOG_GITHUB_PATH: str | None = None
-if CHANNEL_LOG_URL:
-    _clp = urlparse(CHANNEL_LOG_URL)
-    if _clp.netloc == "github.com":
-        _cl_parts = _clp.path.strip("/").split("/")
-        # format: /owner/repo/blob/branch/path/to/file
-        if len(_cl_parts) >= 2:
-            CHANNEL_LOG_GITHUB_REPO = f"{_cl_parts[0]}/{_cl_parts[1]}"
-        if "blob" in _cl_parts:
-            _bi = _cl_parts.index("blob")
-            if _bi + 2 < len(_cl_parts):
-                CHANNEL_LOG_GITHUB_PATH = "/".join(_cl_parts[_bi + 2:])
+_clp = urlparse(CHANNEL_LOG_URL)
+if _clp.netloc == "github.com":
+    _cl_parts = _clp.path.strip("/").split("/")
+    # format: /owner/repo/blob/branch/path/to/file
+    if len(_cl_parts) >= 2:
+        CHANNEL_LOG_GITHUB_REPO = f"{_cl_parts[0]}/{_cl_parts[1]}"
+    if "blob" in _cl_parts:
+        _bi = _cl_parts.index("blob")
+        if _bi + 2 < len(_cl_parts):
+            CHANNEL_LOG_GITHUB_PATH = "/".join(_cl_parts[_bi + 2:])
 
-# GitHub URL for the cookies folder.
-# Set COOKIES_REPO_UR (or COOKIES_REPO_URL) in environment variables, e.g.:
-#   COOKIES_REPO_UR=https://github.com/<owner>/<repo>/tree/main/cookies
-COOKIES_REPO_URL = (
-    os.environ.get("COOKIES_REPO_UR", "").strip()
-    or os.environ.get("COOKIES_REPO_URL", "").strip()
-    or None
+# NEW: GitHub URL for the cookies folder
+# Set COOKIES_REPO_URL in Railway env vars, e.g.:
+#   https://github.com/Afrsto/bot-users/tree/main/cookies
+COOKIES_REPO_URL = os.environ.get(
+    "COOKIES_REPO_URL",
+    "https://github.com/Afrsto/bot-users/tree/main/cookies"   # default hardcoded
 )
 
 # NEW: Parse cookies GitHub repo + path from COOKIES_REPO_URL
@@ -126,8 +124,8 @@ else:
     logging.warning("⚠️ DATABASE_URL not set – config will NOT persist across Railway restarts")
 
 # ────────────────────────────────────────────────────────────────
-# Parse GitHub repo and file path from REMOTE_LOG_URL
-# Example: https://github.com/<owner>/<repo>/blob/main/users.txt
+# Parse GitHub repo and file path from REMOTE_LOG_URL_D
+#REMOTE_LOG_URL = Example URL: https://github.com/Afrsto/bot-users/blob/main/users.txt
 # ────────────────────────────────────────────────────────────────
 GITHUB_REPO = None
 GITHUB_FILE_PATH = None
