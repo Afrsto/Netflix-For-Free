@@ -39,30 +39,32 @@ GITHUB_TOKEN      = os.environ.get("GITHUB_TOKEN")
 REMOTE_LOG_URL    = os.environ.get("REMOTE_LOG_URL")
 
 # GitHub URL for saving/loading guild→channel link configs (survives bot updates)
-# This is the logs.txt file used to persist /channel command mappings
-#   https://github.com/Afrsto/bot-users/blob/main/logs.txt
-CHANNEL_LOG_URL = "https://github.com/Afrsto/bot-users/blob/main/logs.txt"
+# Set CHANNEL_LOG_URL in environment variables, e.g.:
+#   CHANNEL_LOG_URL=https://github.com/<owner>/<repo>/blob/main/logs.txt
+CHANNEL_LOG_URL: str | None = os.environ.get("CHANNEL_LOG_URL", "").strip() or None
 
 # Parse CHANNEL_LOG_URL into repo + file path
 CHANNEL_LOG_GITHUB_REPO: str | None = None
 CHANNEL_LOG_GITHUB_PATH: str | None = None
-_clp = urlparse(CHANNEL_LOG_URL)
-if _clp.netloc == "github.com":
-    _cl_parts = _clp.path.strip("/").split("/")
-    # format: /owner/repo/blob/branch/path/to/file
-    if len(_cl_parts) >= 2:
-        CHANNEL_LOG_GITHUB_REPO = f"{_cl_parts[0]}/{_cl_parts[1]}"
-    if "blob" in _cl_parts:
-        _bi = _cl_parts.index("blob")
-        if _bi + 2 < len(_cl_parts):
-            CHANNEL_LOG_GITHUB_PATH = "/".join(_cl_parts[_bi + 2:])
+if CHANNEL_LOG_URL:
+    _clp = urlparse(CHANNEL_LOG_URL)
+    if _clp.netloc == "github.com":
+        _cl_parts = _clp.path.strip("/").split("/")
+        # format: /owner/repo/blob/branch/path/to/file
+        if len(_cl_parts) >= 2:
+            CHANNEL_LOG_GITHUB_REPO = f"{_cl_parts[0]}/{_cl_parts[1]}"
+        if "blob" in _cl_parts:
+            _bi = _cl_parts.index("blob")
+            if _bi + 2 < len(_cl_parts):
+                CHANNEL_LOG_GITHUB_PATH = "/".join(_cl_parts[_bi + 2:])
 
-# NEW: GitHub URL for the cookies folder
-# Set COOKIES_REPO_URL in Railway env vars, e.g.:
-#   https://github.com/Afrsto/bot-users/tree/main/cookies
-COOKIES_REPO_URL = os.environ.get(
-    "COOKIES_REPO_URL",
-    "https://github.com/Afrsto/bot-users/tree/main/cookies"   # default hardcoded
+# GitHub URL for the cookies folder.
+# Set COOKIES_REPO_UR (or COOKIES_REPO_URL) in environment variables, e.g.:
+#   COOKIES_REPO_UR=https://github.com/<owner>/<repo>/tree/main/cookies
+COOKIES_REPO_URL = (
+    os.environ.get("COOKIES_REPO_UR", "").strip()
+    or os.environ.get("COOKIES_REPO_URL", "").strip()
+    or None
 )
 
 # NEW: Parse cookies GitHub repo + path from COOKIES_REPO_URL
@@ -124,8 +126,8 @@ else:
     logging.warning("⚠️ DATABASE_URL not set – config will NOT persist across Railway restarts")
 
 # ────────────────────────────────────────────────────────────────
-# Parse GitHub repo and file path from REMOTE_LOG_URL_D
-#REMOTE_LOG_URL = Example URL: https://github.com/Afrsto/bot-users/blob/main/users.txt
+# Parse GitHub repo and file path from REMOTE_LOG_URL
+# Example: https://github.com/<owner>/<repo>/blob/main/users.txt
 # ────────────────────────────────────────────────────────────────
 GITHUB_REPO = None
 GITHUB_FILE_PATH = None
@@ -631,21 +633,21 @@ async def log_user_activity(
     )
 
     txt_files_str = ", ".join(used_txt_files) if used_txt_files else "N/A"
-    lang_label    = {"ar": "Arabic 🇸🇦", "en": "English 🇬🇧"}.get(language, language) if language else "N/A"
+    lang_label    = {"ar": "Arabic", "en": "English"}.get(language, language) if language else "N/A"
 
     line = (
         f"[{now_egypt} EGY] "
-        f"👤 User: {username} (Display: {display_name}) | "
-        f"🆔 ID: {user_id} | "
-        f"🗓️  Account Created: {account_since} | "
-        f"📅 Joined Server: {login_date_server} | "
-        f"🏠 Server: {server_name} (ID: {server_id}) | "
-        f"💬 Channel: #{channel_name} | "
-        f"🎭 Roles: [{roles_str}] | "
-        f"🌐 Language: {lang_label} | "
-        f"📄 Files Used: [{txt_files_str}] | "
-        f"📊 Status: {condition} | "
-        f"🔎 Result: {result}\n"
+        f"User: {username} (Display: {display_name}) | "
+        f"ID: {user_id} | "
+        f"Account Created: {account_since} | "
+        f"Joined Server: {login_date_server} | "
+        f"Server: {server_name} (ID: {server_id}) | "
+        f"Channel: #{channel_name} | "
+        f"Roles: [{roles_str}] | "
+        f"Language: {lang_label} | "
+        f"Files Used: [{txt_files_str}] | "
+        f"Status: {condition} | "
+        f"Result: {result}\n"
     )
 
     # 1. Write locally
@@ -665,71 +667,71 @@ async def log_user_activity(
 # ╚══════════════════════════════════════════════════════════════╝
 TRANSLATIONS: dict[str, dict[str, str]] = {
     "en": {
-        "lang_prompt":            "🌐 **Please select your language:**\n🌐 **الرجاء اختيار اللغة:**",
-        "lang_selected":          "✅ Language selected: **English**",
-        "confirm_prompt":         "🎬 **Do you want to generate a Netflix login link?**\n",
-        "progress":               "⏳ **Generating your Netflix link… please wait.**",
-        "no_cookies_folder":      "❌ Cookies folder not found. Please contact the administrator.",
-        "no_cookie_files":        "❌ No accounts available in the database right now. Please try again later.",
-        "timeout":                "⌛ The validation process took too long. Please try again later.",
-        "unexpected_error":       "⚠️ An unexpected error occurred. Please try again.",
-        "cookie_invalid":         "❌ The selected session is invalid or expired. Please try again.",
-        "success_title":          "✅ 🎬 Netflix Login Link Ready!",
-        "success_desc":           "🔗 Click the link below to log in automatically:\n\n{link}",
-        "footer":                 "⚠️ This link is for personal use only – do not share it.",
-        "tv_instruction":         " **TV Activation:** Visit **netflix.com/tv9** and enter the code shown on your screen.",
-        "yes_label":              "✅  Yes, generate link",
-        "no_label":               "❌  No, cancel",
-        "cancelled":              "🚫 Process cancelled.",
-        "not_for_you":            "🚫 You cannot interact with this menu.",
-        "timeout_msg":            "⏰ Request timed out due to inactivity.",
-        "wrong_channel_no_config": "⚠️ No channel configured. Admins must run `/channel` first.",
-        "wrong_channel_with_config": "❌ This command can only be used in {channel}.",
-        "wrong_guild":            "❌ This bot is restricted to a specific server.",
+        "lang_prompt":            "**Please select your language:**\n**الرجاء اختيار اللغة:**",
+        "lang_selected":          "Language selected: **English**",
+        "confirm_prompt":         "**Do you want to generate a Netflix login link?**\n",
+        "progress":               "Generating your Netflix link… please wait.",
+        "no_cookies_folder":      "Cookies folder not found. Please contact the administrator.",
+        "no_cookie_files":        "No accounts are available right now. Please try again later.",
+        "timeout":                "The validation process timed out. Please try again later.",
+        "unexpected_error":       "An unexpected error occurred. Please try again.",
+        "cookie_invalid":         "The selected session is invalid or expired. Please try again.",
+        "success_title":          "Netflix Login Link Ready",
+        "success_desc":           "Click the link below to log in automatically:\n\n{link}",
+        "footer":                 "This link is for personal use only — do not share it.",
+        "tv_instruction":         "**TV Activation:** Visit **netflix.com/tv9** and enter the code shown on your screen.",
+        "yes_label":              "Yes, generate link",
+        "no_label":               "No, cancel",
+        "cancelled":              "Process cancelled.",
+        "not_for_you":            "You cannot interact with this menu.",
+        "timeout_msg":            "Request timed out due to inactivity.",
+        "wrong_channel_no_config": "No channel configured. Admins must run `/channel` first.",
+        "wrong_channel_with_config": "This command can only be used in {channel}.",
+        "wrong_guild":            "This bot is restricted to a specific server.",
         "setup_desc": (
-            "Welcome! 👋 Use the `/create` command to generate a Netflix PC login link.\n\n"
-            "**📋 How to use:**\n"
-            "1️⃣  Type `/create` in this channel.\n"
-            "2️⃣  Select your preferred language.\n"
-            "3️⃣  Confirm the generation.\n"
-            "4️⃣  Wait a few seconds for your personal link.\n"
-            "5️⃣  To log in on TV, visit **netflix.com/tv9** and enter the code shown on your screen.\n"
-            "6️⃣  ⚠️ These links are for **PC and TV only** — they do **not** work on mobile phones.\n\n"
-            "*⚠️ Note: Links are single-use. Messages auto-delete after 1 minute for privacy.*"
+            "Welcome! Use the `/create` command to generate a Netflix login link.\n\n"
+            "**How to use:**\n"
+            "1.  Type `/create` in this channel.\n"
+            "2.  Select your preferred language.\n"
+            "3.  Confirm the generation.\n"
+            "4.  Wait a few seconds for your personal link.\n"
+            "5.  To log in on TV, visit **netflix.com/tv9** and enter the code shown on your screen.\n"
+            "6.  These links work on **PC and TV only** — they do not work on mobile.\n\n"
+            "*Links are single-use. Messages auto-delete after 1 minute for privacy.*"
         ),
     },
     "ar": {
-        "lang_prompt":            "🌐 **Please select your language:**\n🌐 **الرجاء اختيار اللغة:**",
-        "lang_selected":          "\u200f✅ تم اختيار اللغة: **العربية**",
-        "confirm_prompt":         "\u200f🎬 **هل تريد إنشاء رابط تسجيل دخول لـ نتفليكس؟**\n",
-        "progress":               "\u200f⏳ **جاري إنشاء الرابط الخاص بك… يرجى الانتظار.**",
-        "no_cookies_folder":      "\u200f❌ مجلد ملفات تعريف الارتباط غير موجود. يرجى الاتصال بالمسؤول.",
-        "no_cookie_files":        "\u200f❌ لا توجد حسابات متاحة حالياً في قاعدة البيانات. حاول لاحقاً.",
-        "timeout":                "\u200f⌛ استغرق التحقق وقتاً طويلاً. يرجى المحاولة مرة أخرى لاحقاً.",
-        "unexpected_error":       "\u200f⚠️ حدث خطأ غير متوقع أثناء معالجة الطلب.",
-        "cookie_invalid":         "\u200f❌ الحساب المختار غير صالح أو منتهي الصلاحية. حاول مجدداً.",
-        "success_title":          "\u200f✅ 🎬 رابط تسجيل الدخول إلى نتفليكس جاهز!",
-        "success_desc":           "\u200f🔗 انقر على الرابط أدناه لتسجيل الدخول تلقائياً:\n\n{link}",
-        "footer":                 "\u200f⚠️ هذا الرابط للاستخدام الشخصي فقط – يُمنع مشاركته.",
-        "tv_instruction":         "\u200f **تفعيل التلفاز:** قم بزيارة **netflix.com/tv9** وأدخل الرمز المعروض على شاشتك.",
-        "yes_label":              "✅  نعم، أنشئ الرابط",
-        "no_label":               "❌  لا، إلغاء",
-        "cancelled":              "\u200f🚫 تم إلغاء العملية.",
-        "not_for_you":            "\u200f🚫 لا يمكنك التفاعل مع هذه القائمة.",
-        "timeout_msg":            "\u200f⏰ انتهت مهلة الطلب بسبب عدم التفاعل.",
-        "wrong_channel_no_config": "\u200f⚠️ لم يتم إعداد القناة. يجب على المسؤول استخدام أمر `/channel` أولاً.",
-        "wrong_channel_with_config": "\u200f❌ لا يمكن استخدام هذا الأمر إلا في {channel}.",
-        "wrong_guild":            "\u200f❌ هذا البوت مخصص للعمل في سيرفر محدد فقط.",
+        "lang_prompt":            "**Please select your language:**\n**الرجاء اختيار اللغة:**",
+        "lang_selected":          "\u200fتم اختيار اللغة: **العربية**",
+        "confirm_prompt":         "\u200f**هل تريد إنشاء رابط تسجيل دخول لـ نتفليكس؟**\n",
+        "progress":               "\u200fجاري إنشاء الرابط الخاص بك… يرجى الانتظار.",
+        "no_cookies_folder":      "\u200fمجلد ملفات تعريف الارتباط غير موجود. يرجى الاتصال بالمسؤول.",
+        "no_cookie_files":        "\u200fلا توجد حسابات متاحة حالياً. حاول لاحقاً.",
+        "timeout":                "\u200fاستغرق التحقق وقتاً طويلاً. يرجى المحاولة مرة أخرى.",
+        "unexpected_error":       "\u200fحدث خطأ غير متوقع أثناء معالجة الطلب.",
+        "cookie_invalid":         "\u200fالحساب المختار غير صالح أو منتهي الصلاحية. حاول مجدداً.",
+        "success_title":          "\u200fرابط تسجيل الدخول إلى نتفليكس جاهز",
+        "success_desc":           "\u200fانقر على الرابط أدناه لتسجيل الدخول تلقائياً:\n\n{link}",
+        "footer":                 "\u200fهذا الرابط للاستخدام الشخصي فقط — يُمنع مشاركته.",
+        "tv_instruction":         "\u200f**تفعيل التلفاز:** قم بزيارة **netflix.com/tv9** وأدخل الرمز المعروض على شاشتك.",
+        "yes_label":              "نعم، أنشئ الرابط",
+        "no_label":               "لا، إلغاء",
+        "cancelled":              "\u200fتم إلغاء العملية.",
+        "not_for_you":            "\u200fلا يمكنك التفاعل مع هذه القائمة.",
+        "timeout_msg":            "\u200fانتهت مهلة الطلب بسبب عدم التفاعل.",
+        "wrong_channel_no_config": "\u200fلم يتم إعداد القناة. يجب على المسؤول استخدام أمر `/channel` أولاً.",
+        "wrong_channel_with_config": "\u200fلا يمكن استخدام هذا الأمر إلا في {channel}.",
+        "wrong_guild":            "\u200fهذا البوت مخصص للعمل في سيرفر محدد فقط.",
         "setup_desc": (
-            "مرحباً! 👋 استخدم أمر `/create` لإنشاء رابط تسجيل دخول لـ نتفليكس.\n\n"
-            "**📋 طريقة الاستخدام:**\n"
-            "1️⃣  اكتب `/create` في هذه القناة.\n"
-            "2️⃣  اختر لغتك المفضلة.\n"
-            "3️⃣  قم بتأكيد الإنشاء.\n"
-            "4️⃣  انتظر بضع ثوانٍ للحصول على رابطك الشخصي.\n"
-            "\u200f5️⃣  لتسجيل الدخول على التلفاز، قم بزيارة **netflix.com/tv9** وأدخل الرمز المعروض على شاشتك.\n"
-            "\u200f6️⃣  ⚠️ هذه الروابط مخصصة لـ **الكمبيوتر والتلفاز فقط** — لا تعمل على **الهاتف المحمول**.\n\n"
-            "\u200f*⚠️ ملاحظة: الروابط للاستخدام مرة واحدة. يتم حذف الرسائل تلقائياً بعد دقيقة للخصوصية.*"
+            "مرحباً! استخدم أمر `/create` لإنشاء رابط تسجيل دخول لـ نتفليكس.\n\n"
+            "**طريقة الاستخدام:**\n"
+            "1.  اكتب `/create` في هذه القناة.\n"
+            "2.  اختر لغتك المفضلة.\n"
+            "3.  قم بتأكيد الإنشاء.\n"
+            "4.  انتظر بضع ثوانٍ للحصول على رابطك الشخصي.\n"
+            "\u200f5.  لتسجيل الدخول على التلفاز، قم بزيارة **netflix.com/tv9** وأدخل الرمز المعروض على شاشتك.\n"
+            "\u200f6.  هذه الروابط مخصصة لـ **الكمبيوتر والتلفاز فقط** — لا تعمل على الهاتف المحمول.\n\n"
+            "\u200f*الروابط للاستخدام مرة واحدة. يتم حذف الرسائل تلقائياً بعد دقيقة للخصوصية.*"
         ),
     },
 }
@@ -1005,10 +1007,10 @@ class ConfirmView(discord.ui.View):
         self.lang_message: discord.Message | None = None
         self.confirm_message: discord.Message | None = None
 
-        yes_btn = discord.ui.Button(label=TRANSLATIONS[language]["yes_label"], style=discord.ButtonStyle.green, emoji="🎬")
+        yes_btn = discord.ui.Button(label=TRANSLATIONS[language]["yes_label"], style=discord.ButtonStyle.green)
         yes_btn.callback = self.yes_callback
 
-        no_btn = discord.ui.Button(label=TRANSLATIONS[language]["no_label"], style=discord.ButtonStyle.red, emoji="🚫")
+        no_btn = discord.ui.Button(label=TRANSLATIONS[language]["no_label"], style=discord.ButtonStyle.red)
         no_btn.callback = self.no_callback
 
         self.add_item(yes_btn)
@@ -1127,7 +1129,7 @@ class ConfirmView(discord.ui.View):
                 timestamp=datetime.now(),
             )
             embed.set_thumbnail(url="https://upload.wikimedia.org/wikipedia/commons/0/08/Netflix_2015_logo.svg")
-            embed.set_footer(text=t["footer"] + "  •  X2 Salah Utility 🎬")
+            embed.set_footer(text=t["footer"] + "  •  X2 Salah Utility")
 
             await interaction.edit_original_response(content=None, embed=embed)
             tv_message = await interaction.followup.send(t["tv_instruction"], ephemeral=True)
@@ -1195,7 +1197,7 @@ async def cleanup_messages(
 # ║               /channel COMMAND  (Admin only)                ║
 # ║  UPDATED: stores channel per guild ID                       ║
 # ╚══════════════════════════════════════════════════════════════╝
-@bot.tree.command(name="channel", description="📌 Set the text channel where the bot will work (Admin only)")
+@bot.tree.command(name="channel", description="Set the text channel where the bot will work (Admin only)")
 @app_commands.default_permissions(administrator=True)
 async def set_channel(interaction: discord.Interaction, channel: discord.TextChannel) -> None:
     if not interaction.user.guild_permissions.administrator:
@@ -1215,12 +1217,12 @@ async def set_channel(interaction: discord.Interaction, channel: discord.TextCha
 
     # Bilingual pinned setup embed
     embed = discord.Embed(
-        title="🎬 Netflix Link Generator  |  مولد روابط نتفليكس",
+        title="Netflix Link Generator  |  مولد روابط نتفليكس",
         description=f"🇬🇧 **English:**\n{TRANSLATIONS['en']['setup_desc']}\n\n🇸🇦 **العربية:**\n{TRANSLATIONS['ar']['setup_desc']}",
         color=discord.Color.from_rgb(229, 9, 20),
         timestamp=datetime.now(),
     )
-    embed.set_footer(text="⚡ X2 Salah Utility  •  Netflix Bot 🎬")
+    embed.set_footer(text="X2 Salah Utility  •  Netflix Bot")
     try:
         setup_msg = await channel.send(embed=embed)
         await setup_msg.pin()
@@ -1235,7 +1237,7 @@ async def set_channel(interaction: discord.Interaction, channel: discord.TextCha
 # ║                /create COMMAND                              ║
 # ║  UPDATED: pre-checks guild + channel before proceeding      ║
 # ╚══════════════════════════════════════════════════════════════╝
-@bot.tree.command(name="create", description="🎬 Generate a Netflix PC login link from a random cookie file")
+@bot.tree.command(name="create", description="Generate a Netflix login link from a random cookie file")
 async def create(interaction: discord.Interaction) -> None:
     user_lang = get_user_lang(interaction)
 
@@ -1267,41 +1269,39 @@ async def create(interaction: discord.Interaction) -> None:
 @bot.event
 async def on_ready() -> None:
     log.info("━" * 60)
-    log.info(f"🤖 Logged in as : {bot.user}  (ID: {bot.user.id})")
-    # UPDATED: log all allowed guilds
-    log.info(f"🏠 Allowed guilds: {ALLOWED_GUILD_IDS}")
-    # NEW: log cookie source
+    log.info(f"Logged in as : {bot.user}  (ID: {bot.user.id})")
+    log.info(f"Allowed guilds: {ALLOWED_GUILD_IDS}")
     if COOKIES_GITHUB_REPO:
-        log.info(f"🍪 Cookie source : GitHub → {COOKIES_GITHUB_REPO}/{COOKIES_GITHUB_PATH} [{COOKIES_GITHUB_BRANCH}]")
+        log.info(f"Cookie source : GitHub -> {COOKIES_GITHUB_REPO}/{COOKIES_GITHUB_PATH} [{COOKIES_GITHUB_BRANCH}]")
     else:
-        log.info(f"🍪 Cookie source : Local → {COOKIES_FOLDER.resolve()}")
+        log.info(f"Cookie source : Local -> {COOKIES_FOLDER.resolve()}")
 
-    # NEW: Initialize persistent config (PostgreSQL or file fallback)
+    # Initialize persistent config (PostgreSQL or file fallback)
     await config.init_db()
 
-    # NEW: log channel config state on startup
+    # Log channel config state on startup
     for gid in ALLOWED_GUILD_IDS:
         ch = config.get_channel_for_guild(gid)
         if ch:
-            log.info(f"📌 Guild {gid} → channel {ch} (configured)")
+            log.info(f"Guild {gid} -> channel {ch} (configured)")
         else:
-            log.warning(f"⚠️ Guild {gid} → no channel configured (set DEFAULT_CHANNEL_ID or run /channel)")
+            log.warning(f"Guild {gid} -> no channel configured (set DEFAULT_CHANNEL_ID or run /channel)")
     if GITHUB_REPO and GITHUB_FILE_PATH:
-        log.info(f"📡 GitHub log target: {GITHUB_REPO}/{GITHUB_FILE_PATH}")
+        log.info(f"GitHub log target: {GITHUB_REPO}/{GITHUB_FILE_PATH}")
     else:
-        log.warning("⚠️ GitHub logging is DISABLED – REMOTE_LOG_URL not set or invalid")
+        log.warning("GitHub logging is DISABLED – REMOTE_LOG_URL not set or invalid")
     log.info("━" * 60)
 
     bot.tree.interaction_check = global_interaction_check
 
-    # UPDATED: sync commands to ALL allowed guilds
+    # Sync commands to all allowed guilds
     for guild_id in ALLOWED_GUILD_IDS:
         guild_obj = discord.Object(id=guild_id)
         try:
             synced = await bot.tree.sync(guild=guild_obj)
-            log.info(f"✅ Synced {len(synced)} slash command(s) to guild {guild_id}")
+            log.info(f"Synced {len(synced)} slash command(s) to guild {guild_id}")
         except Exception as e:
-            log.error(f"❌ Failed to sync commands to guild {guild_id}: {e}")
+            log.error(f"Failed to sync commands to guild {guild_id}: {e}")
 
 
 # ╔══════════════════════════════════════════════════════════════╗
