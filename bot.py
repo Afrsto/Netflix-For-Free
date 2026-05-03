@@ -1128,7 +1128,7 @@ class ConfirmView(discord.ui.View):
                 timestamp=datetime.now(),
             )
             embed.set_thumbnail(url="https://upload.wikimedia.org/wikipedia/commons/0/08/Netflix_2015_logo.svg")
-            embed.set_footer(text=t["footer"] + "  •  ⚡ @x2.214 Utility  •  Netflix Bot 🎬")
+            embed.set_footer(text=t["footer"] + "  •  ⚡ 994817247061225633 Utility  •  Netflix Bot 🎬")
 
             await interaction.edit_original_response(content=None, embed=embed)
             tv_message = await interaction.followup.send(t["tv_instruction"], ephemeral=True)
@@ -1221,7 +1221,7 @@ async def set_channel(interaction: discord.Interaction, channel: discord.TextCha
         color=discord.Color.from_rgb(229, 9, 20),
         timestamp=datetime.now(),
     )
-    embed.set_footer(text="⚡ @x2.214 Utility  •  Netflix Bot 🎬")
+    embed.set_footer(text="⚡ 994817247061225633 Utility  •  Netflix Bot 🎬")
     try:
         setup_msg = await channel.send(embed=embed)
         await setup_msg.pin()
