@@ -40,6 +40,7 @@ REMOTE_LOG_URL    = os.environ.get("REMOTE_LOG_URL")
 
 # GitHub URL for saving/loading guild→channel link configs (survives bot updates)
 # Set CHANNEL_LOG_URL in environment variables, e.g.:
+#   CHANNEL_LOG_URL=https://github.com/<owner>/<repo>/blob/main/logs.txt
 CHANNEL_LOG_URL: str | None = os.environ.get("CHANNEL_LOG_URL", "").strip() or None
 
 # Parse CHANNEL_LOG_URL into repo + file path
@@ -49,6 +50,7 @@ if CHANNEL_LOG_URL:
     _clp = urlparse(CHANNEL_LOG_URL)
     if _clp.netloc == "github.com":
         _cl_parts = _clp.path.strip("/").split("/")
+        # format: /owner/repo/blob/branch/path/to/file
         if len(_cl_parts) >= 2:
             CHANNEL_LOG_GITHUB_REPO = f"{_cl_parts[0]}/{_cl_parts[1]}"
         if "blob" in _cl_parts:
@@ -58,6 +60,7 @@ if CHANNEL_LOG_URL:
 
 # GitHub URL for the cookies folder.
 # Set COOKIES_REPO_UR (or COOKIES_REPO_URL) in environment variables, e.g.:
+#   COOKIES_REPO_UR=https://github.com/<owner>/<repo>/tree/main/cookies
 COOKIES_REPO_URL = (
     os.environ.get("COOKIES_REPO_UR", "").strip()
     or os.environ.get("COOKIES_REPO_URL", "").strip()
@@ -73,6 +76,7 @@ if COOKIES_REPO_URL:
     _cp = urlparse(COOKIES_REPO_URL)
     if _cp.netloc == "github.com":
         _parts = _cp.path.strip("/").split("/")
+        # format: /owner/repo/tree/branch/path/to/folder
         if len(_parts) >= 2:
             COOKIES_GITHUB_REPO = f"{_parts[0]}/{_parts[1]}"
         if "tree" in _parts:
@@ -663,71 +667,72 @@ async def log_user_activity(
 # ╚══════════════════════════════════════════════════════════════╝
 TRANSLATIONS: dict[str, dict[str, str]] = {
     "en": {
-        "lang_prompt":            "🌐 **Please select your language:**\n🌐 **الرجاء اختيار اللغة:**",
-        "lang_selected":          "✅ Language selected: **English**",
-        "confirm_prompt":         "🎬 **Do you want to generate a Netflix login link?**\n",
-        "progress":               "⏳ **Generating your Netflix link… please wait.**",
-        "no_cookies_folder":      "❌ Cookies folder not found. Please contact the administrator.",
-        "no_cookie_files":        "❌ No accounts available in the database right now. Please try again later.",
-        "timeout":                "⌛ The validation process took too long. Please try again later.",
-        "unexpected_error":       "⚠️ An unexpected error occurred. Please try again.",
-        "cookie_invalid":         "❌ The selected session is invalid or expired. Please try again.",
-        "success_title":          "✅ 🎬 Netflix Login Link Ready!",
-        "success_desc":           "🔗 Click the link below to log in automatically:\n\n{link}",
-        "footer":                 "⚠️ This link is for personal use only – do not share it.",
-        "tv_instruction":         " **TV Activation:** Visit **netflix.com/tv9** and enter the code shown on your screen.",
-        "yes_label":              "✅  Yes, generate link",
-        "no_label":               "❌  No, cancel",
-        "cancelled":              "🚫 Process cancelled.",
-        "not_for_you":            "🚫 You cannot interact with this menu.",
-        "timeout_msg":            "⏰ Request timed out due to inactivity.",
-        "wrong_channel_no_config": "⚠️ No channel configured. Admins must run `/channel` first.",
-        "wrong_channel_with_config": "❌ This command can only be used in {channel}.",
-        "wrong_guild":            "❌ This bot is restricted to a specific server.",
-        "setup_desc": (
-            "Welcome! 👋 Use the `/create` command to generate a Netflix PC login link.\n\n"
-            "**📋 How to use:**\n"
-            "1️⃣  Type `/create` in this channel.\n"
-            "2️⃣  Select your preferred language.\n"
-            "3️⃣  Confirm the generation.\n"
-            "4️⃣  Wait a few seconds for your personal link.\n"
-            "5️⃣  To log in on TV, visit **netflix.com/tv9** and enter the code shown on your screen.\n"
-            "6️⃣  ⚠️ These links are for **PC and TV only** — they do **not** work on mobile phones.\n\n"
-            "*⚠️ Note: Links are single-use. Messages auto-delete after 1 minute for privacy.*"
-        ),
-    },
-    "ar": {
-        "lang_prompt":            "🌐 **Please select your language:**\n🌐 **الرجاء اختيار اللغة:**",
-        "lang_selected":          "\u200f✅ تم اختيار اللغة: **العربية**",
-        "confirm_prompt":         "\u200f🎬 **هل تريد إنشاء رابط تسجيل دخول لـ نتفليكس؟**\n",
-        "progress":               "\u200f⏳ **جاري إنشاء الرابط الخاص بك… يرجى الانتظار.**",
-        "no_cookies_folder":      "\u200f❌ مجلد ملفات تعريف الارتباط غير موجود. يرجى الاتصال بالمسؤول.",
-        "no_cookie_files":        "\u200f❌ لا توجد حسابات متاحة حالياً في قاعدة البيانات. حاول لاحقاً.",
-        "timeout":                "\u200f⌛ استغرق التحقق وقتاً طويلاً. يرجى المحاولة مرة أخرى لاحقاً.",
-        "unexpected_error":       "\u200f⚠️ حدث خطأ غير متوقع أثناء معالجة الطلب.",
-        "cookie_invalid":         "\u200f❌ الحساب المختار غير صالح أو منتهي الصلاحية. حاول مجدداً.",
-        "success_title":          "\u200f✅ 🎬 رابط تسجيل الدخول إلى نتفليكس جاهز!",
-        "success_desc":           "\u200f🔗 انقر على الرابط أدناه لتسجيل الدخول تلقائياً:\n\n{link}",
-        "footer":                 "\u200f⚠️ هذا الرابط للاستخدام الشخصي فقط – يُمنع مشاركته.",
-        "tv_instruction":         "\u200f **تفعيل التلفاز:** قم بزيارة **netflix.com/tv9** وأدخل الرمز المعروض على شاشتك.",
-        "yes_label":              "✅  نعم، أنشئ الرابط",
-        "no_label":               "❌  لا، إلغاء",
-        "cancelled":              "\u200f🚫 تم إلغاء العملية.",
-        "not_for_you":            "\u200f🚫 لا يمكنك التفاعل مع هذه القائمة.",
-        "timeout_msg":            "\u200f⏰ انتهت مهلة الطلب بسبب عدم التفاعل.",
-        "wrong_channel_no_config": "\u200f⚠️ لم يتم إعداد القناة. يجب على المسؤول استخدام أمر `/channel` أولاً.",
-        "wrong_channel_with_config": "\u200f❌ لا يمكن استخدام هذا الأمر إلا في {channel}.",
-        "wrong_guild":            "\u200f❌ هذا البوت مخصص للعمل في سيرفر محدد فقط.",
+        "lang_prompt":            "**Please select your language:**\n**الرجاء اختيار اللغة:**",
+        "lang_selected":          "Language selected: **English**",
+        "confirm_prompt":         "**Do you want to generate a Netflix login link?**\n",
+        "progress":               "Generating your Netflix link… please wait.",
+        "no_cookies_folder":      "Cookies folder not found. Please contact the administrator.",
+        "no_cookie_files":        "No accounts are available right now. Please try again later.",
+        "timeout":                "The validation process timed out. Please try again later.",
+        "unexpected_error":       "An unexpected error occurred. Please try again.",
+        "cookie_invalid":         "The selected session is invalid or expired. Please try again.",
+        "success_title":          "Netflix Login Link Ready",
+        "success_desc":           "Click the link below to log in automatically:\n\n{link}",
+        "footer":                 "This link is for personal use only — do not share it.",
+        "tv_instruction":         "**TV Activation:** Visit **netflix.com/tv9** and enter the code shown on your screen.",
+        "yes_label":              "Yes, generate link",
+        "no_label":               "No, cancel",
+        "cancelled":              "Process cancelled.",
+        "not_for_you":            "You cannot interact with this menu.",
+        "timeout_msg":            "Request timed out due to inactivity.",
+        "wrong_channel_no_config": "No channel configured. Admins must run `/channel` first.",
+        "wrong_channel_with_config": "This command can only be used in {channel}.",
+        "wrong_guild":            "This bot is restricted to a specific server.",
         "setup_desc": (
             "مرحباً! 👋 استخدم أمر `/create` لإنشاء رابط تسجيل دخول لـ نتفليكس.\n\n"
             "**📋 طريقة الاستخدام:**\n"
-            "1️⃣  في هذه القناة create/ اكتب.\n"
+            "1️⃣  اكتب `create/` في هذه القناة.\n"
             "2️⃣  اختر لغتك المفضلة.\n"
             "3️⃣  قم بتأكيد الإنشاء.\n"
             "4️⃣  انتظر بضع ثوانٍ للحصول على رابطك الشخصي.\n"
             "\u200f5️⃣  لتسجيل الدخول على التلفاز، قم بزيارة **netflix.com/tv9** وأدخل الرمز المعروض على شاشتك.\n"
             "\u200f6️⃣  ⚠️ هذه الروابط مخصصة لـ **الكمبيوتر والتلفاز فقط** — لا تعمل على **الهاتف المحمول**.\n\n"
             "\u200f*⚠️ ملاحظة: الروابط للاستخدام مرة واحدة. يتم حذف الرسائل تلقائياً بعد دقيقة للخصوصية.*"
+        ),
+    },
+    },
+    "ar": {
+        "lang_prompt":            "**Please select your language:**\n**الرجاء اختيار اللغة:**",
+        "lang_selected":          "\u200fتم اختيار اللغة: **العربية**",
+        "confirm_prompt":         "\u200f**هل تريد إنشاء رابط تسجيل دخول لـ نتفليكس؟**\n",
+        "progress":               "\u200fجاري إنشاء الرابط الخاص بك… يرجى الانتظار.",
+        "no_cookies_folder":      "\u200fمجلد ملفات تعريف الارتباط غير موجود. يرجى الاتصال بالمسؤول.",
+        "no_cookie_files":        "\u200fلا توجد حسابات متاحة حالياً. حاول لاحقاً.",
+        "timeout":                "\u200fاستغرق التحقق وقتاً طويلاً. يرجى المحاولة مرة أخرى.",
+        "unexpected_error":       "\u200fحدث خطأ غير متوقع أثناء معالجة الطلب.",
+        "cookie_invalid":         "\u200fالحساب المختار غير صالح أو منتهي الصلاحية. حاول مجدداً.",
+        "success_title":          "\u200fرابط تسجيل الدخول إلى نتفليكس جاهز",
+        "success_desc":           "\u200fانقر على الرابط أدناه لتسجيل الدخول تلقائياً:\n\n{link}",
+        "footer":                 "\u200fهذا الرابط للاستخدام الشخصي فقط — يُمنع مشاركته.",
+        "tv_instruction":         "\u200f**تفعيل التلفاز:** قم بزيارة **netflix.com/tv9** وأدخل الرمز المعروض على شاشتك.",
+        "yes_label":              "نعم، أنشئ الرابط",
+        "no_label":               "لا، إلغاء",
+        "cancelled":              "\u200fتم إلغاء العملية.",
+        "not_for_you":            "\u200fلا يمكنك التفاعل مع هذه القائمة.",
+        "timeout_msg":            "\u200fانتهت مهلة الطلب بسبب عدم التفاعل.",
+        "wrong_channel_no_config": "\u200fلم يتم إعداد القناة. يجب على المسؤول استخدام أمر `/channel` أولاً.",
+        "wrong_channel_with_config": "\u200fلا يمكن استخدام هذا الأمر إلا في {channel}.",
+        "wrong_guild":            "\u200fهذا البوت مخصص للعمل في سيرفر محدد فقط.",
+        "setup_desc": (
+            "مرحباً! استخدم أمر `/create` لإنشاء رابط تسجيل دخول لـ نتفليكس.\n\n"
+            "**طريقة الاستخدام:**\n"
+            "1.  اكتب `/create` في هذه القناة.\n"
+            "2.  اختر لغتك المفضلة.\n"
+            "3.  قم بتأكيد الإنشاء.\n"
+            "4.  انتظر بضع ثوانٍ للحصول على رابطك الشخصي.\n"
+            "\u200f5.  لتسجيل الدخول على التلفاز، قم بزيارة **netflix.com/tv9** وأدخل الرمز المعروض على شاشتك.\n"
+            "\u200f6.  هذه الروابط مخصصة لـ **الكمبيوتر والتلفاز فقط** — لا تعمل على الهاتف المحمول.\n\n"
+            "\u200f*الروابط للاستخدام مرة واحدة. يتم حذف الرسائل تلقائياً بعد دقيقة للخصوصية.*"
         ),
     },
 }
