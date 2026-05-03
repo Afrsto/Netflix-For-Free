@@ -635,17 +635,17 @@ async def log_user_activity(
 
     line = (
         f"[{now_egypt} EGY] "
-        f"User: {username} (Display: {display_name}) | "
-        f"ID: {user_id} | "
-        f"Account Created: {account_since} | "
-        f"Joined Server: {login_date_server} | "
-        f"Server: {server_name} (ID: {server_id}) | "
-        f"Channel: #{channel_name} | "
-        f"Roles: [{roles_str}] | "
-        f"Language: {lang_label} | "
-        f"Files Used: [{txt_files_str}] | "
-        f"Status: {condition} | "
-        f"Result: {result}\n"
+        f"👤 User: {username} (Display: {display_name}) | "
+        f"🆔 ID: {user_id} | "
+        f"🗓️  Account Created: {account_since} | "
+        f"📅 Joined Server: {login_date_server} | "
+        f"🏠 Server: {server_name} (ID: {server_id}) | "
+        f"💬 Channel: #{channel_name} | "
+        f"🎭 Roles: [{roles_str}] | "
+        f"🌐 Language: {lang_label} | "
+        f"📄 Files Used: [{txt_files_str}] | "
+        f"📊 Status: {condition} | "
+        f"🔎 Result: {result}\n"
     )
 
     # 1. Write locally
