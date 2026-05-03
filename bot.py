@@ -693,7 +693,8 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
             "3️⃣  Confirm the generation.\n"
             "4️⃣  Wait a few seconds for your personal link.\n"
             "5️⃣  To log in on TV, visit **netflix.com/tv9** and enter the code shown on your screen.\n"
-            "\n\n"
+            "6️⃣  ⚠️ To know how to use the bot on PC, phone, and link the account to the TV, you can watch this video.\n\n"
+            "6️⃣  https://youtu.be/25nqd_0gAfc\n\n"
             "*⚠️ Note: Links are single-use. Messages auto-delete after 1 minute for privacy.*"
         ),
     },
@@ -727,7 +728,8 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
             "3️⃣  قم بتأكيد الإنشاء.\n"
             "4️⃣  انتظر بضع ثوانٍ للحصول على رابطك الشخصي.\n"
             "\u200f5️⃣  لتسجيل الدخول على التلفاز، قم بزيارة **netflix.com/tv9** وأدخل الرمز المعروض على شاشتك.\n"
-            "\u200f\n\n"
+            "\u200f6️⃣  ⚠️ لمعرفة كيفية استخدام البوت على الكمبيوتر والهاتف وربط الحساب بالتلفزيون، يمكنك مشاهدة هذا الفيديو.**.\n\n"
+            "\u200f6️⃣  https://youtu.be/25nqd_0gAfc**.\n\n"
             "\u200f*⚠️ ملاحظة: الروابط للاستخدام مرة واحدة. يتم حذف الرسائل تلقائياً بعد دقيقة للخصوصية.*"
         ),
     },
