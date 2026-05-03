@@ -1220,9 +1220,9 @@ async def set_channel(interaction: discord.Interaction, channel: discord.TextCha
         color=discord.Color.from_rgb(229, 9, 20),
         timestamp=datetime.now(),
     )
-    embed.set_footer(text="⚡ Utility  •  Netflix Bot 🎬")
+    embed.set_footer(text="⚡ X2 Salah Utility  •  Netflix Bot 🎬")
     try:
-        setup_msg = await channel.send(content="<@994817247061225633>", embed=embed)
+        setup_msg = await channel.send(embed=embed)
         await setup_msg.pin()
         log.info(f"📌 Pinned setup message in #{channel.name} (ID: {channel.id})")
     except discord.Forbidden:
