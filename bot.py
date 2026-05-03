@@ -677,8 +677,8 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "success_desc":           "🔗 Click the link below to log in automatically:\n\n{link}",
         "footer":                 "⚠️ This link is for personal use only – do not share it.",
         "tv_instruction":         " **TV Activation:** Visit **netflix.com/tv9** and enter the code shown on your screen.",
-        "yes_label":              "Yes, generate link",
-        "no_label":               "No, cancel",
+        "yes_label":              "✅  Yes, generate link",
+        "no_label":               "❌  No, cancel",
         "cancelled":              "🚫 Process cancelled.",
         "not_for_you":            "🚫 You cannot interact with this menu.",
         "timeout_msg":            "⏰ Request timed out due to inactivity.",
@@ -693,6 +693,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
             "3️⃣  Confirm the generation.\n"
             "4️⃣  Wait a few seconds for your personal link.\n"
             "5️⃣  To log in on TV, visit **netflix.com/tv9** and enter the code shown on your screen.\n"
+            "6️⃣  ⚠️ These links are for **PC and TV only** — they do **not** work on mobile phones.\n\n"
             "*⚠️ Note: Links are single-use. Messages auto-delete after 1 minute for privacy.*"
         ),
     },
@@ -710,8 +711,8 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "success_desc":           "\u200f🔗 انقر على الرابط أدناه لتسجيل الدخول تلقائياً:\n\n{link}",
         "footer":                 "\u200f⚠️ هذا الرابط للاستخدام الشخصي فقط – يُمنع مشاركته.",
         "tv_instruction":         "\u200f **تفعيل التلفاز:** قم بزيارة **netflix.com/tv9** وأدخل الرمز المعروض على شاشتك.",
-        "yes_label":              "نعم، أنشئ الرابط",
-        "no_label":               "لا، إلغاء",
+        "yes_label":              "✅  نعم، أنشئ الرابط",
+        "no_label":               "❌  لا، إلغاء",
         "cancelled":              "\u200f🚫 تم إلغاء العملية.",
         "not_for_you":            "\u200f🚫 لا يمكنك التفاعل مع هذه القائمة.",
         "timeout_msg":            "\u200f⏰ انتهت مهلة الطلب بسبب عدم التفاعل.",
@@ -726,6 +727,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
             "3️⃣  قم بتأكيد الإنشاء.\n"
             "4️⃣  انتظر بضع ثوانٍ للحصول على رابطك الشخصي.\n"
             "\u200f5️⃣  لتسجيل الدخول على التلفاز، قم بزيارة **netflix.com/tv9** وأدخل الرمز المعروض على شاشتك.\n"
+            "\u200f6️⃣  ⚠️ هذه الروابط مخصصة لـ **الكمبيوتر والتلفاز فقط** — لا تعمل على **الهاتف المحمول**.\n\n"
             "\u200f*⚠️ ملاحظة: الروابط للاستخدام مرة واحدة. يتم حذف الرسائل تلقائياً بعد دقيقة للخصوصية.*"
         ),
     },
