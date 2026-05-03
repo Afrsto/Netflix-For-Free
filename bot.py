@@ -728,7 +728,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
             "3️⃣  قم بتأكيد الإنشاء.\n"
             "4️⃣  انتظر بضع ثوانٍ للحصول على رابطك الشخصي.\n"
             "\u200f5️⃣  لتسجيل الدخول على التلفاز، قم بزيارة **netflix.com/tv9** وأدخل الرمز المعروض على شاشتك.\n"
-            "⚠️ To know how to use the bot on PC, phone, and link the account to the TV, you can watch this video. 👇\n\n"
+            "⚠️ لمعرفة كيفية استخدام البوت على الكمبيوتر والهاتف وربط الحساب بالتلفاز، يمكنك مشاهدة هذا الفيديو. 👇\n\n"
             "👉  https://www.youtube.com/watch?v=25nqd_0gAfc 👈\n\n"
             "\u200f*⚠️ ملاحظة: الروابط للاستخدام مرة واحدة. يتم حذف الرسائل تلقائياً بعد دقيقة للخصوصية.*"
         ),
