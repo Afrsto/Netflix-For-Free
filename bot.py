@@ -39,6 +39,25 @@ DISCORD_BOT_TOKEN = os.environ.get("DISCORD_TOKEN")
 GITHUB_TOKEN      = os.environ.get("GITHUB_TOKEN")
 REMOTE_LOG_URL    = os.environ.get("REMOTE_LOG_URL")
 
+# GitHub URL for saving/loading guild→channel link configs (survives bot updates)
+# This is the logs.txt file used to persist /channel command mappings
+#   https://github.com/Afrsto/bot-users/blob/main/logs.txt
+CHANNEL_LOG_URL = "https://github.com/Afrsto/bot-users/blob/main/logs.txt"
+
+# Parse CHANNEL_LOG_URL into repo + file path
+CHANNEL_LOG_GITHUB_REPO: str | None = None
+CHANNEL_LOG_GITHUB_PATH: str | None = None
+_clp = urlparse(CHANNEL_LOG_URL)
+if _clp.netloc == "github.com":
+    _cl_parts = _clp.path.strip("/").split("/")
+    # format: /owner/repo/blob/branch/path/to/file
+    if len(_cl_parts) >= 2:
+        CHANNEL_LOG_GITHUB_REPO = f"{_cl_parts[0]}/{_cl_parts[1]}"
+    if "blob" in _cl_parts:
+        _bi = _cl_parts.index("blob")
+        if _bi + 2 < len(_cl_parts):
+            CHANNEL_LOG_GITHUB_PATH = "/".join(_cl_parts[_bi + 2:])
+
 # NEW: GitHub URL for the cookies folder
 # Set COOKIES_REPO_URL in Railway env vars, e.g.:
 #   https://github.com/Afrsto/bot-users/tree/main/cookies
@@ -345,6 +364,124 @@ def update_users_txt_on_github(new_line: str) -> None:
 
 
 # ╔══════════════════════════════════════════════════════════════╗
+# ║         GITHUB CHANNEL-LINK LOG  (logs.txt)                 ║
+# ║  Persists guild→channel mappings so /channel survives       ║
+# ║  bot updates without needing to be re-run.                  ║
+# ╚══════════════════════════════════════════════════════════════╝
+
+_channel_log_sha: str | None = None
+
+
+def _get_channel_log_repo():
+    """Return the GitHub repo object for the channel log, or None."""
+    if not GITHUB_TOKEN or not CHANNEL_LOG_GITHUB_REPO:
+        return None
+    g = Github(GITHUB_TOKEN)
+    return g.get_repo(CHANNEL_LOG_GITHUB_REPO)
+
+
+def save_channel_link_to_github(guild_id: int, guild_name: str, channel_id: int, channel_name: str) -> None:
+    """
+    Append a CHANNEL_LINK entry to logs.txt on GitHub.
+    Format (one per line):
+        CHANNEL_LINK | guild_id=... | guild_name=... | channel_id=... | channel_name=... | set_at=...
+    Older entries for the same guild are replaced so the file stays clean.
+    """
+    if not CHANNEL_LOG_GITHUB_REPO or not CHANNEL_LOG_GITHUB_PATH:
+        log.warning("⚠️ Channel-log GitHub target not configured – skip save.")
+        return
+
+    repo = _get_channel_log_repo()
+    if not repo:
+        log.warning("⚠️ Channel-log GitHub repo unavailable – skip save.")
+        return
+
+    global _channel_log_sha
+    now_str = datetime.now(EGYPT_TZ).strftime("%Y-%m-%d %H:%M:%S")
+    new_entry = (
+        f"CHANNEL_LINK | guild_id={guild_id} | guild_name={guild_name} | "
+        f"channel_id={channel_id} | channel_name={channel_name} | set_at={now_str}\n"
+    )
+
+    try:
+        try:
+            contents = repo.get_contents(CHANNEL_LOG_GITHUB_PATH)
+            raw = b64decode(contents.content).decode("utf-8")
+            _channel_log_sha = contents.sha
+        except GithubException as e:
+            if e.status == 404:
+                raw = ""
+                _channel_log_sha = None
+            else:
+                log.error(f"❌ channel-log get_contents error: {e}")
+                return
+
+        # Remove any previous entry for this guild so there are no duplicates
+        lines = [ln for ln in raw.splitlines(keepends=True)
+                 if not (ln.startswith("CHANNEL_LINK") and f"guild_id={guild_id}" in ln)]
+        lines.append(new_entry)
+        new_content = "".join(lines)
+
+        if _channel_log_sha:
+            repo.update_file(
+                path=CHANNEL_LOG_GITHUB_PATH,
+                message=f"📌 Update channel link: guild {guild_id} → channel {channel_id}",
+                content=new_content,
+                sha=_channel_log_sha,
+                branch="main",
+            )
+        else:
+            repo.create_file(
+                path=CHANNEL_LOG_GITHUB_PATH,
+                message=f"🆕 Create logs.txt with channel link: guild {guild_id}",
+                content=new_content,
+                branch="main",
+            )
+        log.info(f"✅ Channel link saved to GitHub logs.txt: guild {guild_id} → channel {channel_id}")
+    except GithubException as e:
+        log.error(f"❌ Failed to save channel link to GitHub: {e.status} – {e.data.get('message', '')}")
+
+
+def load_channel_links_from_github() -> dict[str, int]:
+    """
+    Read logs.txt from GitHub and return a dict of {str(guild_id): channel_id}
+    for every CHANNEL_LINK line found. Returns empty dict on any error.
+    """
+    if not CHANNEL_LOG_GITHUB_REPO or not CHANNEL_LOG_GITHUB_PATH:
+        return {}
+
+    repo = _get_channel_log_repo()
+    if not repo:
+        return {}
+
+    try:
+        contents = repo.get_contents(CHANNEL_LOG_GITHUB_PATH)
+        raw = b64decode(contents.content).decode("utf-8")
+    except GithubException as e:
+        if e.status == 404:
+            log.info("ℹ️ logs.txt not found on GitHub – no channel links to restore.")
+        else:
+            log.error(f"❌ Failed to read logs.txt from GitHub: {e}")
+        return {}
+
+    result: dict[str, int] = {}
+    for line in raw.splitlines():
+        if not line.startswith("CHANNEL_LINK"):
+            continue
+        try:
+            parts = {kv.split("=", 1)[0].strip(): kv.split("=", 1)[1].strip()
+                     for kv in line.split("|")[1:] if "=" in kv}
+            gid = parts["guild_id"]
+            cid = int(parts["channel_id"])
+            result[gid] = cid
+        except Exception:
+            continue  # malformed line – skip silently
+
+    log.info(f"📥 Loaded {len(result)} channel link(s) from GitHub logs.txt: {result}")
+    return result
+
+
+# ╔══════════════════════════════════════════════════════════════╗
 # ║           GITHUB COOKIES FETCHER  (NEW)                     ║
 # ║  Fetches .txt cookie files from the GitHub cookies folder   ║
 # ║  so Railway doesn't need a local cookies/ directory.        ║
@@ -622,37 +759,56 @@ class Config:
 
     async def init_db(self) -> None:
         """
-        NEW: Called once in on_ready().
+        Called once in on_ready().
         Creates the guild_config table if it doesn't exist,
         then loads all rows into the in-memory cache.
-        Falls back silently if DATABASE_URL is not set.
+        Fallback chain:
+          1. PostgreSQL  (Railway DATABASE_URL)
+          2. config.json (local file)
+          3. GitHub logs.txt (CHANNEL_LOG_URL – survives bot updates)
+          4. DEFAULT_CHANNEL_ID env var
         """
         if not DATABASE_URL or not HAS_ASYNCPG:
-            log.warning("⚠️ PostgreSQL unavailable – using file/env fallback only")
+            log.warning("⚠️ PostgreSQL unavailable – using file/env/GitHub fallback")
             self._load_from_file()
-            return
+        else:
+            try:
+                # Railway's DATABASE_URL starts with postgres:// but asyncpg needs postgresql://
+                dsn = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+                self._db_pool = await asyncpg.create_pool(dsn, min_size=1, max_size=3)
 
-        try:
-            # Railway's DATABASE_URL starts with postgres:// but asyncpg needs postgresql://
-            dsn = DATABASE_URL.replace("postgres://", "postgresql://", 1)
-            self._db_pool = await asyncpg.create_pool(dsn, min_size=1, max_size=3)
+                async with self._db_pool.acquire() as conn:
+                    await conn.execute("""
+                        CREATE TABLE IF NOT EXISTS guild_config (
+                            guild_id  TEXT PRIMARY KEY,
+                            channel_id BIGINT NOT NULL
+                        )
+                    """)
+                    rows = await conn.fetch("SELECT guild_id, channel_id FROM guild_config")
+                    for row in rows:
+                        self.guilds[row["guild_id"]] = int(row["channel_id"])
 
-            async with self._db_pool.acquire() as conn:
-                await conn.execute("""
-                    CREATE TABLE IF NOT EXISTS guild_config (
-                        guild_id  TEXT PRIMARY KEY,
-                        channel_id BIGINT NOT NULL
-                    )
-                """)
-                rows = await conn.fetch("SELECT guild_id, channel_id FROM guild_config")
-                for row in rows:
-                    self.guilds[row["guild_id"]] = int(row["channel_id"])
+                log.info(f"✅ PostgreSQL config loaded – {len(self.guilds)} guild(s): {self.guilds}")
+            except Exception as e:
+                log.error(f"❌ PostgreSQL init failed: {e} – falling back to file/GitHub")
+                self._db_pool = None
+                self._load_from_file()
 
-            log.info(f"✅ PostgreSQL config loaded – {len(self.guilds)} guild(s): {self.guilds}")
-        except Exception as e:
-            log.error(f"❌ PostgreSQL init failed: {e} – falling back to file/env")
-            self._db_pool = None
-            self._load_from_file()
+        # ── GitHub logs.txt fallback ───────────────────────────────────
+        # Fill in any guilds still missing from the in-memory cache.
+        # This is the key layer that survives bot updates even when
+        # PostgreSQL and config.json are both unavailable.
+        import asyncio as _asyncio
+        loop = _asyncio.get_event_loop()
+        github_links = await loop.run_in_executor(None, load_channel_links_from_github)
+        restored = 0
+        for gid, cid in github_links.items():
+            if gid not in self.guilds:
+                self.guilds[gid] = cid
+                restored += 1
+                log.info(f"🔄 Restored from GitHub logs.txt: guild {gid} → channel {cid}")
+        if restored:
+            log.info(f"✅ {restored} guild channel link(s) restored from GitHub logs.txt")
 
     async def _save_to_db(self, guild_id: str, channel_id: int) -> None:
         """NEW: Upsert a guild→channel mapping into PostgreSQL."""
@@ -718,10 +874,17 @@ class Config:
         # NEW: env-based fallback — always works even after Railway restart
         return DEFAULT_CHANNEL_ID
 
-    async def set_allowed_channel(self, guild_id: int, channel_id: int) -> None:
+    async def set_allowed_channel(
+        self,
+        guild_id: int,
+        channel_id: int,
+        guild_name: str = "Unknown",
+        channel_name: str = "Unknown",
+    ) -> None:
         """
         FIXED: Now async — saves to PostgreSQL first (persistent),
         then file (best-effort), then updates in-memory cache.
+        Also writes to GitHub logs.txt so the mapping survives bot updates.
         """
         guild_key = str(guild_id)
         self.guilds[guild_key] = channel_id
@@ -732,6 +895,15 @@ class Config:
 
         # 2. Save to file (best-effort, may not survive restart on Railway)
         self._save_to_file()
+
+        # 3. Save to GitHub logs.txt (survives bot updates – the new fallback layer)
+        import asyncio as _asyncio
+        loop = _asyncio.get_event_loop()
+        await loop.run_in_executor(
+            None,
+            save_channel_link_to_github,
+            guild_id, guild_name, channel_id, channel_name,
+        )
 
         log.info(f"✅ Channel set: guild {guild_id} → channel {channel_id}")
 
@@ -1033,9 +1205,10 @@ async def set_channel(interaction: discord.Interaction, channel: discord.TextCha
         await interaction.response.send_message(msg, ephemeral=True)
         return
 
-    # UPDATED: store channel per guild (now async → saves to PostgreSQL)
+    # UPDATED: store channel per guild (now async → saves to PostgreSQL + GitHub logs.txt)
     guild_id = interaction.guild.id
-    await config.set_allowed_channel(guild_id, channel.id)
+    guild_name = interaction.guild.name if interaction.guild else "Unknown"
+    await config.set_allowed_channel(guild_id, channel.id, guild_name=guild_name, channel_name=channel.name)
 
     lang = get_user_lang(interaction)
     success_msg = f"✅ Bot will now **only** respond in {channel.mention}." if lang == "en" else f"✅ البوت سيعمل الآن **فقط** في {channel.mention}."
