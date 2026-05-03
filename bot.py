@@ -949,9 +949,6 @@ class ConfirmView(discord.ui.View):
                     pass
 
         if result:
-            user = interaction.user
-            member = interaction.guild.get_member(user.id) if interaction.guild else None
-
             embed = discord.Embed(
                 title=t["success_title"],
                 description=t["success_desc"].format(link=result),
@@ -959,11 +956,6 @@ class ConfirmView(discord.ui.View):
                 timestamp=datetime.now(),
             )
             embed.set_thumbnail(url="https://upload.wikimedia.org/wikipedia/commons/0/08/Netflix_2015_logo.svg")
-            if member and member.joined_at:
-                embed.add_field(name="📅 Server Member Since", value=member.joined_at.strftime("%Y-%m-%d"), inline=True)
-            if member:
-                roles_str = ", ".join(r.name for r in member.roles[1:]) or "None"
-                embed.add_field(name="🎭 Roles", value=roles_str, inline=False)
             embed.set_footer(text=t["footer"] + "  •  X2 Salah Utility 🎬")
 
             await interaction.edit_original_response(content=None, embed=embed)
