@@ -42,6 +42,13 @@ REMOTE_LOG_URL    = os.environ.get("REMOTE_LOG_URL")
 # Set CHANNEL_LOG_URL in environment variables, e.g.:
 CHANNEL_LOG_URL: str | None = os.environ.get("CHANNEL_LOG_URL", "").strip() or None
 
+# GitHub URL for the ban-users.txt file (stores banned user IDs)
+# Example: https://github.com/Afrsto/bot-users/blob/main/ban-users.txt
+BAN_USERS_URL: str | None = os.environ.get(
+    "BAN_USERS_URL",
+    "https://github.com/Afrsto/bot-users/blob/main/ban-users.txt"
+).strip() or None
+
 # Parse CHANNEL_LOG_URL into repo + file path
 CHANNEL_LOG_GITHUB_REPO: str | None = None
 CHANNEL_LOG_GITHUB_PATH: str | None = None
@@ -56,6 +63,21 @@ if CHANNEL_LOG_URL:
             _bi = _cl_parts.index("blob")
             if _bi + 2 < len(_cl_parts):
                 CHANNEL_LOG_GITHUB_PATH = "/".join(_cl_parts[_bi + 2:])
+
+# Parse BAN_USERS_URL into repo + file path
+BAN_USERS_GITHUB_REPO: str | None = None
+BAN_USERS_GITHUB_PATH: str | None = None
+if BAN_USERS_URL:
+    _bup = urlparse(BAN_USERS_URL)
+    if _bup.netloc == "github.com":
+        _bu_parts = _bup.path.strip("/").split("/")
+        # format: /owner/repo/blob/branch/path/to/file
+        if len(_bu_parts) >= 2:
+            BAN_USERS_GITHUB_REPO = f"{_bu_parts[0]}/{_bu_parts[1]}"
+        if "blob" in _bu_parts:
+            _bui = _bu_parts.index("blob")
+            if _bui + 2 < len(_bu_parts):
+                BAN_USERS_GITHUB_PATH = "/".join(_bu_parts[_bui + 2:])
 
 # GitHub URL for the cookies folder.
 # Set COOKIES_REPO_UR (or COOKIES_REPO_URL) in environment variables, e.g.:
@@ -513,6 +535,291 @@ def load_channel_links_from_github() -> dict[str, int]:
 
     log.info(f"📥 Loaded {len(result)} channel link(s) from GitHub logs.txt: {result}")
     return result
+
+
+# ╔══════════════════════════════════════════════════════════════╗
+# ║                   BAN SYSTEM                                ║
+# ║  Stores banned user IDs in ban-users.txt on GitHub.        ║
+# ║  Tracks how many times a banned user tries to use the bot. ║
+# ╚══════════════════════════════════════════════════════════════╝
+
+# In-memory cache: set of banned user IDs (int)
+_banned_user_ids: set[int] = set()
+
+# In-memory attempt counter: user_id → number of blocked attempts since ban
+_ban_attempt_counts: dict[int, int] = {}
+
+
+def _get_ban_repo():
+    """Return the GitHub repo object for ban-users.txt, or None."""
+    if not GITHUB_TOKEN or not BAN_USERS_GITHUB_REPO:
+        return None
+    try:
+        g = Github(GITHUB_TOKEN)
+        return g.get_repo(BAN_USERS_GITHUB_REPO)
+    except GithubException as e:
+        log.error(f"❌ Cannot access ban-users repo {BAN_USERS_GITHUB_REPO}: {e}")
+        return None
+
+
+def load_banned_users_from_github() -> set[int]:
+    """
+    Read ban-users.txt from GitHub and return a set of banned user IDs.
+    File format – one entry per line:
+        <user_id> | username=... | banned_at=... | attempts=...
+    Lines starting with # are comments/headers and are ignored.
+    Returns empty set on any error or if the file doesn't exist yet.
+    """
+    if not BAN_USERS_GITHUB_REPO or not BAN_USERS_GITHUB_PATH:
+        log.warning("⚠️ BAN_USERS_URL not configured – ban list disabled.")
+        return set()
+
+    repo = _get_ban_repo()
+    if not repo:
+        return set()
+
+    try:
+        contents = repo.get_contents(BAN_USERS_GITHUB_PATH)
+        raw = b64decode(contents.content).decode("utf-8")
+    except GithubException as e:
+        if e.status == 404:
+            log.info("ℹ️ ban-users.txt not found on GitHub – starting with empty ban list.")
+        else:
+            log.error(f"❌ Failed to read ban-users.txt from GitHub: {e}")
+        return set()
+
+    banned: set[int] = set()
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        try:
+            uid = int(line.split("|")[0].strip())
+            banned.add(uid)
+        except (ValueError, IndexError):
+            continue  # malformed line – skip silently
+
+    log.info(f"🚫 Loaded {len(banned)} banned user(s) from GitHub ban-users.txt: {banned}")
+    return banned
+
+
+def _write_ban_list_to_github(lines: list[str]) -> bool:
+    """
+    Overwrite ban-users.txt on GitHub with the given lines.
+    Returns True on success, False on failure.
+    """
+    if not BAN_USERS_GITHUB_REPO or not BAN_USERS_GITHUB_PATH:
+        return False
+
+    repo = _get_ban_repo()
+    if not repo:
+        return False
+
+    new_content = "\n".join(lines) + ("\n" if lines else "")
+
+    for attempt in range(1, 4):
+        try:
+            try:
+                contents = repo.get_contents(BAN_USERS_GITHUB_PATH)
+                current_sha = contents.sha
+            except GithubException as e:
+                if e.status == 404:
+                    current_sha = None
+                else:
+                    raise
+
+            now_str = datetime.now(EGYPT_TZ).strftime("%Y-%m-%d %H:%M")
+            if current_sha:
+                repo.update_file(
+                    path=BAN_USERS_GITHUB_PATH,
+                    message=f"🚫 Update ban list [{now_str} EGY]",
+                    content=new_content,
+                    sha=current_sha,
+                    branch="main",
+                )
+            else:
+                repo.create_file(
+                    path=BAN_USERS_GITHUB_PATH,
+                    message=f"🆕 Create ban-users.txt [{now_str} EGY]",
+                    content=new_content,
+                    branch="main",
+                )
+            log.info(f"✅ ban-users.txt pushed to GitHub (attempt {attempt})")
+            return True
+
+        except GithubException as e:
+            if e.status == 409 and attempt < 3:
+                import time
+                time.sleep(1.5 * attempt)
+                continue
+            log.error(f"❌ Failed to write ban-users.txt (attempt {attempt}): {e.status} – {e.data}")
+            return False
+    return False
+
+
+def add_ban_to_github(user_id: int, username: str) -> bool:
+    """
+    Append a new ban entry to ban-users.txt on GitHub.
+    Skips if the user is already present.
+    Entry format:
+        <user_id> | username=<name> | banned_at=<timestamp> | attempts=0
+    """
+    if not BAN_USERS_GITHUB_REPO or not BAN_USERS_GITHUB_PATH:
+        return False
+
+    repo = _get_ban_repo()
+    if not repo:
+        return False
+
+    try:
+        try:
+            contents = repo.get_contents(BAN_USERS_GITHUB_PATH)
+            raw = b64decode(contents.content).decode("utf-8")
+        except GithubException as e:
+            if e.status == 404:
+                raw = ""
+            else:
+                raise
+
+        lines = [ln for ln in raw.splitlines() if ln.strip()]
+
+        # Check for duplicate
+        for ln in lines:
+            if not ln.strip() or ln.startswith("#"):
+                continue
+            try:
+                if int(ln.split("|")[0].strip()) == user_id:
+                    log.info(f"ℹ️ User {user_id} already in ban list – skip add.")
+                    return True
+            except (ValueError, IndexError):
+                continue
+
+        now_str = datetime.now(EGYPT_TZ).strftime("%Y-%m-%d %H:%M:%S")
+        new_entry = f"{user_id} | username={username} | banned_at={now_str} | attempts=0"
+        lines.append(new_entry)
+        return _write_ban_list_to_github(lines)
+
+    except GithubException as e:
+        log.error(f"❌ add_ban_to_github failed: {e}")
+        return False
+
+
+def remove_ban_from_github(user_id: int) -> bool:
+    """Remove a user's ban entry from ban-users.txt on GitHub."""
+    if not BAN_USERS_GITHUB_REPO or not BAN_USERS_GITHUB_PATH:
+        return False
+
+    repo = _get_ban_repo()
+    if not repo:
+        return False
+
+    try:
+        try:
+            contents = repo.get_contents(BAN_USERS_GITHUB_PATH)
+            raw = b64decode(contents.content).decode("utf-8")
+        except GithubException as e:
+            if e.status == 404:
+                return True  # nothing to remove
+            raise
+
+        lines = [ln for ln in raw.splitlines() if ln.strip()]
+        new_lines = []
+        removed = False
+        for ln in lines:
+            if ln.startswith("#"):
+                new_lines.append(ln)
+                continue
+            try:
+                if int(ln.split("|")[0].strip()) == user_id:
+                    removed = True
+                    continue  # drop this line
+            except (ValueError, IndexError):
+                pass
+            new_lines.append(ln)
+
+        if not removed:
+            log.info(f"ℹ️ User {user_id} was not in ban-users.txt.")
+            return True
+
+        return _write_ban_list_to_github(new_lines)
+
+    except GithubException as e:
+        log.error(f"❌ remove_ban_from_github failed: {e}")
+        return False
+
+
+def update_ban_attempts_on_github(user_id: int, attempts: int) -> None:
+    """
+    Update the `attempts=N` counter for a banned user in ban-users.txt.
+    Called in a background thread so it never blocks the bot.
+    """
+    if not BAN_USERS_GITHUB_REPO or not BAN_USERS_GITHUB_PATH:
+        return
+
+    repo = _get_ban_repo()
+    if not repo:
+        return
+
+    try:
+        try:
+            contents = repo.get_contents(BAN_USERS_GITHUB_PATH)
+            raw = b64decode(contents.content).decode("utf-8")
+        except GithubException as e:
+            if e.status == 404:
+                return
+            raise
+
+        lines = raw.splitlines()
+        new_lines = []
+        updated = False
+        for ln in lines:
+            stripped = ln.strip()
+            if not stripped or stripped.startswith("#"):
+                new_lines.append(ln)
+                continue
+            try:
+                uid = int(stripped.split("|")[0].strip())
+                if uid == user_id:
+                    # Replace the attempts= field
+                    parts = [p.strip() for p in stripped.split("|")]
+                    new_parts = []
+                    for p in parts:
+                        if p.startswith("attempts="):
+                            new_parts.append(f"attempts={attempts}")
+                        else:
+                            new_parts.append(p)
+                    new_lines.append(" | ".join(new_parts))
+                    updated = True
+                    continue
+            except (ValueError, IndexError):
+                pass
+            new_lines.append(ln)
+
+        if updated:
+            _write_ban_list_to_github(new_lines)
+            log.info(f"📊 Updated attempts for banned user {user_id} → {attempts}")
+
+    except GithubException as e:
+        log.error(f"❌ update_ban_attempts_on_github failed: {e}")
+
+
+def is_user_banned(user_id: int) -> bool:
+    """Fast O(1) check using the in-memory cache."""
+    return user_id in _banned_user_ids
+
+
+def record_ban_attempt(user_id: int) -> int:
+    """
+    Increment and return the attempt count for a banned user.
+    Schedules a background GitHub update every attempt.
+    """
+    _ban_attempt_counts[user_id] = _ban_attempt_counts.get(user_id, 0) + 1
+    count = _ban_attempt_counts[user_id]
+    # Push the updated count to GitHub asynchronously
+    asyncio.get_event_loop().run_in_executor(
+        None, update_ban_attempts_on_github, user_id, count
+    )
+    return count
 
 
 # ╔══════════════════════════════════════════════════════════════╗
@@ -1021,6 +1328,26 @@ def is_allowed_channel(interaction: discord.Interaction) -> bool:
 # ║  UPDATED: checks against ALLOWED_GUILD_IDS list             ║
 # ╚══════════════════════════════════════════════════════════════╝
 async def global_interaction_check(interaction: discord.Interaction) -> bool:
+    # ── Ban check (fast in-memory lookup) ─────────────────────────────
+    if is_user_banned(interaction.user.id):
+        attempts = record_ban_attempt(interaction.user.id)
+        lang = get_user_lang(interaction)
+        msg = (
+            f"🚫 You have been banned from using this bot. (Attempt #{attempts})"
+            if lang == "en"
+            else f"\u200f🚫 تم حظرك من استخدام هذا البوت. (المحاولة رقم #{attempts})"
+        )
+        log.warning(
+            f"🚫 Banned user {interaction.user} (ID: {interaction.user.id}) "
+            f"attempted to use /{interaction.command.name if interaction.command else '?'} "
+            f"– attempt #{attempts}"
+        )
+        if interaction.response.is_done():
+            await interaction.followup.send(msg, ephemeral=True)
+        else:
+            await interaction.response.send_message(msg, ephemeral=True)
+        return False
+
     # UPDATED: multi-guild check
     if interaction.guild is None or interaction.guild.id not in ALLOWED_GUILD_IDS:
         lang = get_user_lang(interaction)
@@ -1383,6 +1710,114 @@ async def create(interaction: discord.Interaction) -> None:
 
 
 # ╔══════════════════════════════════════════════════════════════╗
+# ║               /ban COMMAND  (Admin only)                    ║
+# ║  Blocks a user by ID from using the bot.                   ║
+# ╚══════════════════════════════════════════════════════════════╝
+@bot.tree.command(name="ban", description="🚫 Block a user from using the bot by their Discord ID (Admin only)")
+@app_commands.describe(user_id="The Discord user ID to ban")
+@app_commands.default_permissions(administrator=True)
+async def ban_user(interaction: discord.Interaction, user_id: str) -> None:
+    if not interaction.user.guild_permissions.administrator:
+        lang = get_user_lang(interaction)
+        msg = "❌ You need administrator permissions." if lang == "en" else "❌ تحتاج إلى صلاحيات المسؤول."
+        await interaction.response.send_message(msg, ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    try:
+        uid = int(user_id.strip())
+    except ValueError:
+        await interaction.followup.send("❌ Invalid user ID – must be a numeric Discord ID.", ephemeral=True)
+        return
+
+    if is_user_banned(uid):
+        await interaction.followup.send(f"⚠️ User `{uid}` is already banned.", ephemeral=True)
+        return
+
+    # Try to resolve username for the log entry
+    username = str(uid)
+    try:
+        target = await bot.fetch_user(uid)
+        username = str(target)
+    except Exception:
+        pass
+
+    # Update in-memory cache immediately
+    _banned_user_ids.add(uid)
+    _ban_attempt_counts.setdefault(uid, 0)
+
+    # Persist to GitHub asynchronously
+    success = await asyncio.to_thread(add_ban_to_github, uid, username)
+
+    lang = get_user_lang(interaction)
+    if success:
+        log.info(f"🚫 Admin {interaction.user} banned user {username} (ID: {uid})")
+        msg = (
+            f"✅ User `{username}` (ID: `{uid}`) has been **banned** and added to ban-users.txt."
+            if lang == "en"
+            else f"\u200f✅ تم حظر المستخدم `{username}` (ID: `{uid}`) وإضافته إلى قائمة الحظر."
+        )
+    else:
+        msg = (
+            f"⚠️ User `{uid}` banned locally but **GitHub push failed** – check bot logs."
+            if lang == "en"
+            else f"\u200f⚠️ تم الحظر محليًا لكن **فشل الرفع إلى GitHub** – راجع سجلات البوت."
+        )
+    await interaction.followup.send(msg, ephemeral=True)
+
+
+# ╔══════════════════════════════════════════════════════════════╗
+# ║               /unban COMMAND  (Admin only)                  ║
+# ║  Removes a user ban by ID.                                  ║
+# ╚══════════════════════════════════════════════════════════════╝
+@bot.tree.command(name="unban", description="✅ Remove a bot ban for a user by their Discord ID (Admin only)")
+@app_commands.describe(user_id="The Discord user ID to unban")
+@app_commands.default_permissions(administrator=True)
+async def unban_user(interaction: discord.Interaction, user_id: str) -> None:
+    if not interaction.user.guild_permissions.administrator:
+        lang = get_user_lang(interaction)
+        msg = "❌ You need administrator permissions." if lang == "en" else "❌ تحتاج إلى صلاحيات المسؤول."
+        await interaction.response.send_message(msg, ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    try:
+        uid = int(user_id.strip())
+    except ValueError:
+        await interaction.followup.send("❌ Invalid user ID – must be a numeric Discord ID.", ephemeral=True)
+        return
+
+    if not is_user_banned(uid):
+        await interaction.followup.send(f"⚠️ User `{uid}` is not currently banned.", ephemeral=True)
+        return
+
+    # Update in-memory cache immediately
+    _banned_user_ids.discard(uid)
+    attempts = _ban_attempt_counts.pop(uid, 0)
+
+    # Persist to GitHub asynchronously
+    success = await asyncio.to_thread(remove_ban_from_github, uid)
+
+    lang = get_user_lang(interaction)
+    if success:
+        log.info(f"✅ Admin {interaction.user} unbanned user ID {uid} (had {attempts} attempt(s))")
+        msg = (
+            f"✅ User `{uid}` has been **unbanned**. They had made **{attempts}** blocked attempt(s)."
+            if lang == "en"
+            else f"\u200f✅ تم رفع الحظر عن المستخدم `{uid}`. كان لديه **{attempts}** محاولة محظورة."
+        )
+    else:
+        msg = (
+            f"⚠️ User `{uid}` unbanned locally but **GitHub push failed** – check bot logs."
+            if lang == "en"
+            else f"\u200f⚠️ تم رفع الحظر محليًا لكن **فشل الرفع إلى GitHub** – راجع سجلات البوت."
+        )
+    await interaction.followup.send(msg, ephemeral=True)
+
+
+# ╔══════════════════════════════════════════════════════════════╗
 # ║                       BOT EVENTS                            ║
 # ║  UPDATED: multi-guild logging and sync                      ║
 # ╚══════════════════════════════════════════════════════════════╝
@@ -1401,6 +1836,11 @@ async def on_ready() -> None:
     # NEW: Initialize persistent config (PostgreSQL or file fallback)
     await config.init_db()
 
+    # NEW: Load ban list from GitHub into memory
+    global _banned_user_ids
+    _banned_user_ids = await asyncio.to_thread(load_banned_users_from_github)
+    log.info(f"🚫 Ban list loaded: {len(_banned_user_ids)} banned user(s)")
+
     # NEW: log channel config state on startup
     for gid in ALLOWED_GUILD_IDS:
         ch = config.get_channel_for_guild(gid)
@@ -1412,6 +1852,10 @@ async def on_ready() -> None:
         log.info(f"📡 GitHub log target: {GITHUB_REPO}/{GITHUB_FILE_PATH}")
     else:
         log.warning("⚠️ GitHub logging is DISABLED – REMOTE_LOG_URL not set or invalid")
+    if BAN_USERS_GITHUB_REPO and BAN_USERS_GITHUB_PATH:
+        log.info(f"🚫 Ban list target: {BAN_USERS_GITHUB_REPO}/{BAN_USERS_GITHUB_PATH} ({len(_banned_user_ids)} banned)")
+    else:
+        log.warning("⚠️ Ban list is DISABLED – BAN_USERS_URL not set or invalid")
     log.info("━" * 60)
 
     bot.tree.interaction_check = global_interaction_check
