@@ -302,9 +302,6 @@ def pick_cookie_file(txt_files: list[Path]) -> Path:
 # ╔══════════════════════════════════════════════════════════════╗
 # ║                   GITHUB HELPER FUNCTIONS                   ║
 # ╚══════════════════════════════════════════════════════════════╝
-_github_file_sha: str | None = None
-
-
 def get_github_repo():
     """Return the GitHub repository object, or None if token or repo config is missing."""
     if not GITHUB_TOKEN or not GITHUB_REPO:
@@ -313,52 +310,91 @@ def get_github_repo():
     return g.get_repo(GITHUB_REPO)
 
 
-def update_users_txt_on_github(new_line: str) -> None:
-    """Append a line to the remote users.txt file defined by REMOTE_LOG_URL_D."""
+def update_users_txt_on_github(new_line: str, max_retries: int = 3) -> bool:
+    """
+    Append a line to the remote users.txt file defined by REMOTE_LOG_URL.
+    Improvements:
+    - Retry up to max_retries times on transient GitHub API failures.
+    - Re-fetches SHA before each retry to avoid stale-SHA conflicts (409).
+    - Returns True on success, False on permanent failure.
+    - Keeps file to a rolling 500-line maximum to avoid unbounded growth.
+    """
     if not GITHUB_REPO or not GITHUB_FILE_PATH:
         log.debug("GitHub logging disabled – missing repo or file path.")
-        return
+        return False
 
     repo = get_github_repo()
     if not repo:
         log.warning("GitHub repo not available – log not pushed.")
-        return
+        return False
 
-    global _github_file_sha
-    try:
+    for attempt in range(1, max_retries + 1):
         try:
-            contents = repo.get_contents(GITHUB_FILE_PATH)
-            current_content = b64decode(contents.content).decode("utf-8")
-            _github_file_sha = contents.sha
-        except GithubException as e:
-            if e.status == 404:
-                current_content = ""
-                _github_file_sha = None
-                log.info(f"📄 {GITHUB_FILE_PATH} does not exist – will create it.")
+            # Always fetch the latest SHA to avoid 409 conflicts on concurrent writes
+            try:
+                contents        = repo.get_contents(GITHUB_FILE_PATH)
+                current_content = b64decode(contents.content).decode("utf-8")
+                current_sha     = contents.sha
+            except GithubException as e:
+                if e.status == 404:
+                    current_content = ""
+                    current_sha     = None
+                    log.info(f"📄 {GITHUB_FILE_PATH} does not exist – will create it.")
+                else:
+                    raise   # propagate to retry handler
+
+            # Rolling limit: keep only the last 499 lines + the new one
+            lines = current_content.splitlines(keepends=True)
+            if len(lines) >= 500:
+                lines = lines[-(499):]
+                log.info("🗂️ users.txt trimmed to 500 lines (rolling log).")
+            new_content = "".join(lines) + new_line
+
+            if current_sha:
+                repo.update_file(
+                    path=GITHUB_FILE_PATH,
+                    message=f"📝 Log entry [{datetime.now(EGYPT_TZ).strftime('%Y-%m-%d %H:%M')} EGY]",
+                    content=new_content,
+                    sha=current_sha,
+                    branch="main",
+                )
             else:
-                log.error(f"❌ GitHub get_contents error: {e}")
-                return
+                repo.create_file(
+                    path=GITHUB_FILE_PATH,
+                    message="🆕 Create users.txt with initial log",
+                    content=new_content,
+                    branch="main",
+                )
 
-        new_content = current_content + new_line
+            log.info(f"✅ GitHub log pushed (attempt {attempt}): {new_line.strip()[:80]}")
+            return True
 
-        if _github_file_sha:
-            repo.update_file(
-                path=GITHUB_FILE_PATH,
-                message="📝 Add log entry from Netflix bot",
-                content=new_content,
-                sha=_github_file_sha,
-                branch="main",
-            )
-        else:
-            repo.create_file(
-                path=GITHUB_FILE_PATH,
-                message="🆕 Create users.txt with initial log",
-                content=new_content,
-                branch="main",
-            )
-        log.info(f"✅ GitHub commit successful → {new_line.strip()[:80]}...")
-    except GithubException as e:
-        log.error(f"❌ GitHub commit failed: {e.status} – {e.data.get('message', '')}")
+        except GithubException as e:
+            status  = e.status
+            message = e.data.get("message", "") if isinstance(e.data, dict) else str(e.data)
+            if status == 409 and attempt < max_retries:
+                # SHA conflict – wait briefly and retry with fresh SHA
+                import time
+                log.warning(f"⚠️ GitHub SHA conflict (409) – retry {attempt}/{max_retries} in 1s")
+                time.sleep(1)
+                continue
+            elif status in (500, 502, 503) and attempt < max_retries:
+                import time
+                log.warning(f"⚠️ GitHub server error {status} – retry {attempt}/{max_retries} in 2s")
+                time.sleep(2)
+                continue
+            else:
+                log.error(f"❌ GitHub commit failed after {attempt} attempt(s): {status} – {message}")
+                return False
+        except Exception as e:
+            log.error(f"❌ Unexpected error pushing to GitHub (attempt {attempt}): {e}")
+            if attempt < max_retries:
+                import time
+                time.sleep(1)
+                continue
+            return False
+
+    return False
 
 
 # ╔══════════════════════════════════════════════════════════════╗
@@ -545,7 +581,47 @@ def fetch_github_cookie_content(filename: str) -> str | None:
         return None
 
 
-def pick_github_cookie_file(filenames: list[str]) -> str:
+def _fetch_github_cookie_list_in_path(folder_path: str) -> list[str]:
+    """
+    List .txt filenames in a specific subfolder path inside the GitHub cookies repo.
+    Used by generate_link() for quality-based subfolder routing.
+    """
+    repo = _get_cookies_repo()
+    if not repo:
+        return []
+    try:
+        contents = repo.get_contents(folder_path, ref=COOKIES_GITHUB_BRANCH)
+        txt_files = [
+            c.name for c in contents
+            if c.type == "file" and c.name.endswith(".txt")
+        ]
+        log.info(f"📂 GitHub {folder_path}: {len(txt_files)} .txt file(s): {txt_files}")
+        return txt_files
+    except GithubException as e:
+        log.error(f"❌ Failed to list GitHub path {folder_path}: {e}")
+        return []
+
+
+def _fetch_github_cookie_content_in_path(folder_path: str, filename: str) -> str | None:
+    """
+    Download a single .txt cookie file from a specific subfolder path in the GitHub repo.
+    Used by generate_link() for quality-based subfolder routing.
+    """
+    repo = _get_cookies_repo()
+    if not repo:
+        return None
+    try:
+        file_path   = f"{folder_path.rstrip('/')}/{filename}"
+        content_obj = repo.get_contents(file_path, ref=COOKIES_GITHUB_BRANCH)
+        raw = b64decode(content_obj.content).decode("utf-8")
+        log.info(f"✅ Downloaded GitHub cookie: {file_path} ({len(raw)} bytes)")
+        return raw
+    except GithubException as e:
+        log.error(f"❌ Failed to download {folder_path}/{filename}: {e}")
+        return None
+
+
+
     """
     NEW: Round-robin cookie selection over GitHub filenames (strings, not Paths).
     Mirrors the logic of pick_cookie_file() but works with filename strings.
@@ -585,6 +661,7 @@ async def log_user_activity(
     result: str,
     used_txt_files: list[str] | None = None,
     language: str | None = None,
+    quality: str | None = None,
 ) -> None:
     """Append a structured log entry locally and push to GitHub."""
     now_egypt = datetime.now(EGYPT_TZ).strftime("%Y-%m-%d %H:%M:%S")
@@ -629,19 +706,28 @@ async def log_user_activity(
         else "N/A"
     )
 
-    txt_files_str = ", ".join(used_txt_files) if used_txt_files else "N/A"
-    lang_label    = {"ar": "Arabic 🇸🇦", "en": "English 🇬🇧"}.get(language, language) if language else "N/A"
+    txt_files_str  = ", ".join(used_txt_files) if used_txt_files else "N/A"
+    lang_label     = {"ar": "Arabic 🇸🇦", "en": "English 🇬🇧"}.get(language, language) if language else "N/A"
+    quality_folder = QUALITY_FOLDER_MAP.get(quality, "N/A") if quality else "N/A"
+    quality_label  = {
+        "hd":  "HD 720p 📺",
+        "fhd": "Full HD 1080p 🎬",
+        "uhd": "Ultra HD 4K 💎",
+    }.get(quality, "N/A") if quality else "N/A"
 
     line = (
         f"[{now_egypt} EGY] "
         f"👤 User: {username} (Display: {display_name}) | "
         f"🆔 ID: {user_id} | "
+        f"🌍 Country: {country_name} | "
+        f"🕐 Local Time: {local_time} ({local_tz}) | "
         f"🗓️  Account Created: {account_since} | "
         f"📅 Joined Server: {login_date_server} | "
         f"🏠 Server: {server_name} (ID: {server_id}) | "
         f"💬 Channel: #{channel_name} | "
         f"🎭 Roles: [{roles_str}] | "
         f"🌐 Language: {lang_label} | "
+        f"🎞️ Quality: {quality_label} (folder: {quality_folder}) | "
         f"📄 Files Used: [{txt_files_str}] | "
         f"📊 Status: {condition} | "
         f"🔎 Result: {result}\n"
@@ -655,8 +741,8 @@ async def log_user_activity(
     except Exception as e:
         log.error(f"❌ Failed to write local log: {e}")
 
-    # 2. Push to GitHub (persistent storage)
-    update_users_txt_on_github(line)
+    # 2. Push to GitHub asynchronously (non-blocking)
+    await asyncio.to_thread(update_users_txt_on_github, line)
 
 
 # ╔══════════════════════════════════════════════════════════════╗
@@ -666,7 +752,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
     "en": {
         "lang_prompt":            "🌐 **Please select your language:**\n🌐 **الرجاء اختيار اللغة:**",
         "lang_selected":          "✅ Language selected: **English**",
-        "confirm_prompt":         "🎬 **Do you want to generate a Netflix login link?**\n",
+        "confirm_prompt":         "🎬 **Please choose the streaming quality**\n",
         "progress":               "⏳ **Generating your Netflix link… please wait.**",
         "no_cookies_folder":      "❌ Cookies folder not found. Please contact the administrator.",
         "no_cookie_files":        "❌ No accounts available in the database right now. Please try again later.",
@@ -677,7 +763,9 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "success_desc":           "🔗 Click the link below to log in automatically:\n\n{link}",
         "footer":                 "⚠️ This link is for personal use only – do not share it.",
         "tv_instruction":         " **TV Activation:** Visit **netflix.com/tv9** and enter the code shown on your screen.",
-        "yes_label":              "✅  Yes, generate link",
+        "hd_label":               "HD 720p",
+        "fhd_label":              "Full HD 1080p",
+        "uhd_label":              "Ultra HD 4K",
         "no_label":               "❌  No, cancel",
         "cancelled":              "🚫 Process cancelled.",
         "not_for_you":            "🚫 You cannot interact with this menu.",
@@ -701,7 +789,10 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
     "ar": {
         "lang_prompt":            "🌐 **Please select your language:**\n🌐 **الرجاء اختيار اللغة:**",
         "lang_selected":          "\u200f✅ تم اختيار اللغة: **العربية**",
-        "confirm_prompt":         "\u200f🎬 **هل تريد إنشاء رابط تسجيل دخول لـ نتفليكس؟**\n",
+        "confirm_prompt":         "\u200f🎬 **يرجى اختيار جودة العرض**\n",
+        "hd_label":               "HD 720p",
+        "fhd_label":              "Full HD 1080p",
+        "uhd_label":              "Ultra HD 4K",
         "progress":               "\u200f⏳ **جاري إنشاء الرابط الخاص بك… يرجى الانتظار.**",
         "no_cookies_folder":      "\u200f❌ مجلد ملفات تعريف الارتباط غير موجود. يرجى الاتصال بالمسؤول.",
         "no_cookie_files":        "\u200f❌ لا توجد حسابات متاحة حالياً في قاعدة البيانات. حاول لاحقاً.",
@@ -712,8 +803,6 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "success_desc":           "\u200f🔗 انقر على الرابط أدناه لتسجيل الدخول تلقائياً:\n\n{link}",
         "footer":                 "\u200f⚠️ هذا الرابط للاستخدام الشخصي فقط – يُمنع مشاركته.",
         "tv_instruction":         "\u200f **تفعيل التلفاز:** قم بزيارة **netflix.com/tv9** وأدخل الرمز المعروض على شاشتك.",
-        "yes_label":              "✅  نعم، أنشئ الرابط",
-        "no_label":               "❌  لا، إلغاء",
         "cancelled":              "\u200f🚫 تم إلغاء العملية.",
         "not_for_you":            "\u200f🚫 لا يمكنك التفاعل مع هذه القائمة.",
         "timeout_msg":            "\u200f⏰ انتهت مهلة الطلب بسبب عدم التفاعل.",
@@ -995,88 +1084,122 @@ class LanguageSelectView(discord.ui.View):
 
 
 # ╔══════════════════════════════════════════════════════════════╗
-# ║                   CONFIRMATION VIEW (Yes / No)              ║
+# ║            QUALITY SELECTION VIEW (HD / FHD / UHD)          ║
+# ║  Replaces old Yes/No confirm – user picks streaming quality  ║
+# ║  HD 720p  → /Basic   subfolder                              ║
+# ║  FHD 1080p → /Standard subfolder                            ║
+# ║  UHD 4K   → /Premium  subfolder                             ║
 # ╚══════════════════════════════════════════════════════════════╝
+
+# Maps quality choice → GitHub subfolder name and local subfolder name
+QUALITY_FOLDER_MAP: dict[str, str] = {
+    "hd":  "Basic",
+    "fhd": "Standard",
+    "uhd": "Premium",
+}
+
+
 class ConfirmView(discord.ui.View):
+    """Quality-selection view. Button labels are always the same (HD / FHD / UHD)
+    regardless of language, as per the spec."""
+
     def __init__(self, original_user: discord.User | discord.Member, original_interaction: discord.Interaction, language: str) -> None:
         super().__init__(timeout=60)
-        self.original_user = original_user
+        self.original_user        = original_user
         self.original_interaction = original_interaction
-        self.language = language
-        self.lang_message: discord.Message | None = None
+        self.language             = language
+        self.lang_message:    discord.Message | None = None
         self.confirm_message: discord.Message | None = None
+        self.quality:         str | None = None   # set when a button is pressed
 
-        yes_btn = discord.ui.Button(label=TRANSLATIONS[language]["yes_label"], style=discord.ButtonStyle.green, emoji="🎬")
-        yes_btn.callback = self.yes_callback
+        hd_btn = discord.ui.Button(label=TRANSLATIONS[language]["hd_label"],  style=discord.ButtonStyle.primary, emoji="📺")
+        hd_btn.callback = self._make_quality_callback("hd")
 
-        no_btn = discord.ui.Button(label=TRANSLATIONS[language]["no_label"], style=discord.ButtonStyle.red, emoji="🚫")
-        no_btn.callback = self.no_callback
+        fhd_btn = discord.ui.Button(label=TRANSLATIONS[language]["fhd_label"], style=discord.ButtonStyle.success, emoji="🎬")
+        fhd_btn.callback = self._make_quality_callback("fhd")
 
-        self.add_item(yes_btn)
-        self.add_item(no_btn)
+        uhd_btn = discord.ui.Button(label=TRANSLATIONS[language]["uhd_label"], style=discord.ButtonStyle.danger,  emoji="💎")
+        uhd_btn.callback = self._make_quality_callback("uhd")
 
-    async def yes_callback(self, interaction: discord.Interaction) -> None:
-        if interaction.user.id != self.original_user.id:
-            await interaction.response.send_message(TRANSLATIONS[self.language]["not_for_you"], ephemeral=True)
-            return
+        self.add_item(hd_btn)
+        self.add_item(fhd_btn)
+        self.add_item(uhd_btn)
 
-        await interaction.response.edit_message(content=TRANSLATIONS[self.language]["progress"], view=None)
-        await self.generate_link(interaction)
-        self.stop()
+    def _make_quality_callback(self, quality_key: str):
+        async def callback(interaction: discord.Interaction) -> None:
+            if interaction.user.id != self.original_user.id:
+                await interaction.response.send_message(TRANSLATIONS[self.language]["not_for_you"], ephemeral=True)
+                return
+            self.quality = quality_key
+            await interaction.response.edit_message(content=TRANSLATIONS[self.language]["progress"], view=None)
+            await self.generate_link(interaction)
+            self.stop()
+        return callback
 
+    # no_callback kept for timeout / legacy – no button exposes it any more
     async def no_callback(self, interaction: discord.Interaction) -> None:
         if interaction.user.id != self.original_user.id:
             await interaction.response.send_message(TRANSLATIONS[self.language]["not_for_you"], ephemeral=True)
             return
-
         await interaction.response.edit_message(content=TRANSLATIONS[self.language]["cancelled"], view=None)
-        await log_user_activity(interaction, "Cancelled", "User clicked No", language=self.language)
+        await log_user_activity(interaction, "Cancelled", "User cancelled", language=self.language)
         self.stop()
 
     async def generate_link(self, interaction: discord.Interaction) -> None:
         lang = self.language
         t = TRANSLATIONS[lang]
 
-        # ── NEW: Try GitHub cookies first, fall back to local folder ──────
+        # ── Resolve quality subfolder ──────────────────────────────────
+        quality_key    = self.quality or "fhd"          # default to FHD if somehow unset
+        quality_folder = QUALITY_FOLDER_MAP[quality_key] # "Basic" | "Standard" | "Premium"
+        log.info(f"🎬 Quality selected: {quality_key} → folder: {quality_folder}")
+
+        # ── NEW: Try GitHub cookies first (quality subfolder), fall back to local ──
         chosen_file_name: str | None = None
         cookie_content:   str | None = None
         tmp_path:         str | None = None   # temp file path passed to checker
 
         if COOKIES_GITHUB_REPO and COOKIES_GITHUB_PATH is not None:
-            # Fetch list of .txt files from GitHub (blocking → run in thread)
-            github_names = await asyncio.to_thread(fetch_github_cookie_list)
+            # Build the quality-specific subfolder path inside the GitHub cookies tree
+            base_path   = (COOKIES_GITHUB_PATH.rstrip("/") + "/" + quality_folder) if COOKIES_GITHUB_PATH else quality_folder
+            github_names = await asyncio.to_thread(
+                _fetch_github_cookie_list_in_path, base_path
+            )
 
             if not github_names:
-                log.warning("⚠️ No .txt files in GitHub cookies folder – trying local fallback")
+                log.warning(f"⚠️ No .txt files in GitHub/{base_path} – trying local fallback")
             else:
                 chosen_file_name = await asyncio.to_thread(
                     pick_github_cookie_rotation, github_names
                 )
                 cookie_content = await asyncio.to_thread(
-                    fetch_github_cookie_content, chosen_file_name
+                    _fetch_github_cookie_content_in_path, base_path, chosen_file_name
                 )
                 if cookie_content is None:
                     log.warning(f"⚠️ Could not download {chosen_file_name} – trying local fallback")
                     chosen_file_name = None
 
-        # ── LOCAL FALLBACK: use local cookies/ folder if GitHub failed ────
+        # ── LOCAL FALLBACK: use local cookies/<quality_folder>/ ────────
         if cookie_content is None:
-            if not COOKIES_FOLDER.exists():
+            local_quality_folder = COOKIES_FOLDER / quality_folder
+            if not local_quality_folder.exists():
+                # gracefully fall back to root cookies folder
+                local_quality_folder = COOKIES_FOLDER
+            if not local_quality_folder.exists():
                 await interaction.edit_original_response(content=t["no_cookies_folder"])
                 await log_user_activity(interaction, "Error", "Cookies folder missing", language=self.language)
                 return
 
-            txt_files = list(COOKIES_FOLDER.glob("*.txt"))
+            txt_files = list(local_quality_folder.glob("*.txt"))
             if not txt_files:
                 await interaction.edit_original_response(content=t["no_cookie_files"])
                 await log_user_activity(interaction, "Error", "No cookie files found", language=self.language)
                 return
 
-            chosen_path = pick_cookie_file(txt_files)
+            chosen_path      = pick_cookie_file(txt_files)
             chosen_file_name = chosen_path.name
-            log.info(f"📂 Using local cookie file: {chosen_file_name}")
+            log.info(f"📂 Using local cookie file: {chosen_file_name} from {local_quality_folder}")
 
-            # Write to temp file for checker
             try:
                 cookie_content = chosen_path.read_text(encoding="utf-8")
             except Exception as e:
@@ -1105,12 +1228,12 @@ class ConfirmView(discord.ui.View):
             )
         except asyncio.TimeoutError:
             await interaction.edit_original_response(content=t["timeout"])
-            await log_user_activity(interaction, "Timeout", "Cookie validation timeout", used_txt_files=[chosen_file_name], language=self.language)
+            await log_user_activity(interaction, "Timeout", "Cookie validation timeout", used_txt_files=[chosen_file_name], language=self.language, quality=self.quality)
             return
         except Exception as e:
             log.error(f"❌ Checker error: {e}")
             await interaction.edit_original_response(content=t["unexpected_error"])
-            await log_user_activity(interaction, "Error", f"Exception: {str(e)[:80]}", used_txt_files=[chosen_file_name], language=self.language)
+            await log_user_activity(interaction, "Error", f"Exception: {str(e)[:80]}", used_txt_files=[chosen_file_name], language=self.language, quality=self.quality)
             return
         finally:
             # ALWAYS clean up the temp file
@@ -1156,10 +1279,10 @@ class ConfirmView(discord.ui.View):
             ))
 
             log.info(f"🔗 Link sent to {interaction.user} – cleanup in {CLEANUP_DELAY_SECONDS}s")
-            await log_user_activity(interaction, "✅ Success", "Link generated", used_txt_files=[chosen_file_name], language=self.language)
+            await log_user_activity(interaction, "✅ Success", "Link generated", used_txt_files=[chosen_file_name], language=self.language, quality=self.quality)
         else:
             await interaction.edit_original_response(content=t["cookie_invalid"])
-            await log_user_activity(interaction, "❌ Failed", "Cookie invalid or expired", used_txt_files=[chosen_file_name], language=self.language)
+            await log_user_activity(interaction, "❌ Failed", "Cookie invalid or expired", used_txt_files=[chosen_file_name], language=self.language, quality=self.quality)
 
     async def on_timeout(self) -> None:
         for child in self.children:
