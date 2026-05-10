@@ -25,7 +25,7 @@ except ImportError:
 from netflix_checker import check_cookie_file
 
 # ╔══════════════════════════════════════════════════════════════╗
-# ║                      CONFIGURATION                          ║
+# ║                      CONFIGURATION                           ║
 # ╚══════════════════════════════════════════════════════════════╝
 
 COOKIES_FOLDER         = Path("cookies")   # local fallback (used if GitHub fetch fails)
