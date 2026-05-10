@@ -815,10 +815,12 @@ def record_ban_attempt(user_id: int) -> int:
     """
     _ban_attempt_counts[user_id] = _ban_attempt_counts.get(user_id, 0) + 1
     count = _ban_attempt_counts[user_id]
-    # Push the updated count to GitHub asynchronously
-    asyncio.get_event_loop().run_in_executor(
-        None, update_ban_attempts_on_github, user_id, count
-    )
+    # Push the updated count to GitHub asynchronously (safe from any context)
+    try:
+        loop = asyncio.get_running_loop()
+        loop.run_in_executor(None, update_ban_attempts_on_github, user_id, count)
+    except RuntimeError:
+        pass  # no running loop — attempt count will sync on next write
     return count
 
 
@@ -1714,15 +1716,10 @@ async def create(interaction: discord.Interaction) -> None:
 # ║  Blocks a user by ID from using the bot.                   ║
 # ╚══════════════════════════════════════════════════════════════╝
 @bot.tree.command(name="ban", description="🚫 Block a user from using the bot by their Discord ID (Admin only)")
-@app_commands.describe(user_id="The Discord user ID to ban")
+@app_commands.describe(user_id="The Discord user ID to ban (works even if they left the server)")
 @app_commands.default_permissions(administrator=True)
+@app_commands.guilds(*[discord.Object(id=gid) for gid in ALLOWED_GUILD_IDS])
 async def ban_user(interaction: discord.Interaction, user_id: str) -> None:
-    if not interaction.user.guild_permissions.administrator:
-        lang = get_user_lang(interaction)
-        msg = "❌ You need administrator permissions." if lang == "en" else "❌ تحتاج إلى صلاحيات المسؤول."
-        await interaction.response.send_message(msg, ephemeral=True)
-        return
-
     await interaction.response.defer(ephemeral=True)
 
     try:
@@ -1774,13 +1771,8 @@ async def ban_user(interaction: discord.Interaction, user_id: str) -> None:
 @bot.tree.command(name="unban", description="✅ Remove a bot ban for a user by their Discord ID (Admin only)")
 @app_commands.describe(user_id="The Discord user ID to unban")
 @app_commands.default_permissions(administrator=True)
+@app_commands.guilds(*[discord.Object(id=gid) for gid in ALLOWED_GUILD_IDS])
 async def unban_user(interaction: discord.Interaction, user_id: str) -> None:
-    if not interaction.user.guild_permissions.administrator:
-        lang = get_user_lang(interaction)
-        msg = "❌ You need administrator permissions." if lang == "en" else "❌ تحتاج إلى صلاحيات المسؤول."
-        await interaction.response.send_message(msg, ephemeral=True)
-        return
-
     await interaction.response.defer(ephemeral=True)
 
     try:
