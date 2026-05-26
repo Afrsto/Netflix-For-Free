@@ -930,7 +930,7 @@ def _build_welcome_embed() -> discord.Embed:
             "`/unban` – Unblock a user (Admin) | رفع الحظر (مسؤول)\n"
             "`/banserver` – Ban a server (Admin) | حظر سيرفر (مسؤول)\n"
             "`/unbanserver` – Unban a server (Admin) | رفع حظر سيرفر (مسؤول)\n"
-            "`/channel` – Set bot channel (Admin) | تعيين قناة البوت (مسؤول)\n"
+            "`/channel` – Set bot channel | تعيين قناة البوت\n"
             "`/admin` – Manage bot admins (Admin) | إدارة المشرفين (مسؤول)"
         ),
         inline=False,
@@ -1460,15 +1460,11 @@ async def create(interaction: discord.Interaction) -> None:
 
 @bot.tree.command(
     name="channel",
-    description="📌 Set the text channel where the bot will work (Admin only)",
+    description="📌 Set the text channel where the bot will work",
 )
 @app_commands.describe(channel="The text channel to designate as the bot's working channel")
 async def set_channel(interaction: discord.Interaction, channel: discord.TextChannel) -> None:
     lang = get_user_lang(interaction)
-
-    if not is_admin(interaction.user.id) and not interaction.user.guild_permissions.administrator:
-        await interaction.response.send_message(TRANSLATIONS[lang]["not_admin"], ephemeral=True)
-        return
 
     guild_id   = interaction.guild.id
     guild_name = interaction.guild.name if interaction.guild else "Unknown"
