@@ -111,6 +111,10 @@ BAN_USERS_URL   = os.environ.get(
     "BAN_USERS_URL",
     "https://github.com/Afrsto/bot-users/blob/main/ban-users.txt",
 ).strip() or None
+BAN_SERVERS_URL = os.environ.get(
+    "BAN_SERVERS_URL",
+    "https://github.com/Afrsto/bot-users/blob/main/ban-servers.txt",
+).strip() or None
 ADMIN_USERS_URL = os.environ.get(
     "ADMIN_USERS_URL",
     "https://github.com/Afrsto/bot-users/blob/main/admin-users.txt",
@@ -124,6 +128,7 @@ COOKIES_REPO_URL = (
 GITHUB_REPO, GITHUB_FILE_PATH               = _parse_github_blob_url(REMOTE_LOG_URL)
 CHANNEL_LOG_GITHUB_REPO, CHANNEL_LOG_GITHUB_PATH = _parse_github_blob_url(CHANNEL_LOG_URL)
 BAN_USERS_GITHUB_REPO, BAN_USERS_GITHUB_PATH     = _parse_github_blob_url(BAN_USERS_URL)
+BAN_SERVERS_GITHUB_REPO, BAN_SERVERS_GITHUB_PATH = _parse_github_blob_url(BAN_SERVERS_URL)
 ADMIN_USERS_GITHUB_REPO, ADMIN_USERS_GITHUB_PATH = _parse_github_blob_url(ADMIN_USERS_URL)
 COOKIES_GITHUB_REPO, COOKIES_GITHUB_PATH, COOKIES_GITHUB_BRANCH = _parse_github_tree_url(COOKIES_REPO_URL)
 
@@ -131,6 +136,8 @@ if not GITHUB_REPO:
     log.warning("⚠️ REMOTE_LOG_URL not set or invalid – GitHub user logging disabled")
 if not BAN_USERS_GITHUB_REPO:
     log.warning("⚠️ BAN_USERS_URL not set – ban system disabled")
+if not BAN_SERVERS_GITHUB_REPO:
+    log.warning("⚠️ BAN_SERVERS_URL not set – server ban system disabled")
 if not ADMIN_USERS_GITHUB_REPO:
     log.warning("⚠️ ADMIN_USERS_URL not set – custom admin system disabled")
 if COOKIES_GITHUB_REPO:
@@ -497,6 +504,86 @@ def is_user_banned(user_id: int) -> bool:
     return user_id in _banned_user_ids
 
 
+_banned_guild_ids: set[int] = set()
+
+
+def load_banned_servers_from_github() -> set[int]:
+    if not BAN_SERVERS_GITHUB_REPO or not BAN_SERVERS_GITHUB_PATH:
+        log.warning("⚠️ BAN_SERVERS_URL not configured – server ban list disabled")
+        return set()
+    raw, _ = _read_github_file(BAN_SERVERS_GITHUB_REPO, BAN_SERVERS_GITHUB_PATH)
+    banned: set[int] = set()
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        try:
+            banned.add(int(line.split("|")[0].strip()))
+        except (ValueError, IndexError):
+            continue
+    log.info(f"🚫 Loaded {len(banned)} banned server(s)")
+    return banned
+
+
+def _write_server_ban_list(lines: list[str]) -> bool:
+    content = "\n".join(lines) + ("\n" if lines else "")
+    now_str = datetime.now(EGYPT_TZ).strftime("%Y-%m-%d %H:%M")
+    return _write_github_file(
+        BAN_SERVERS_GITHUB_REPO,
+        BAN_SERVERS_GITHUB_PATH,
+        content,
+        f"🚫 Update server ban list [{now_str} EGY]",
+    )
+
+
+def add_server_ban_to_github(guild_id: int, guild_name: str, reason: str) -> bool:
+    if not BAN_SERVERS_GITHUB_REPO or not BAN_SERVERS_GITHUB_PATH:
+        return False
+    raw, _ = _read_github_file(BAN_SERVERS_GITHUB_REPO, BAN_SERVERS_GITHUB_PATH)
+    lines  = [ln for ln in raw.splitlines() if ln.strip()]
+    for ln in lines:
+        if ln.startswith("#"):
+            continue
+        try:
+            if int(ln.split("|")[0].strip()) == guild_id:
+                log.info(f"ℹ️ Guild {guild_id} already in server ban list")
+                return True
+        except (ValueError, IndexError):
+            continue
+    now_str = datetime.now(EGYPT_TZ).strftime("%Y-%m-%d %H:%M:%S")
+    safe_reason = reason.replace("|", "-")
+    lines.append(
+        f"{guild_id} | guild_name={guild_name} | reason={safe_reason} | banned_at={now_str}"
+    )
+    return _write_server_ban_list(lines)
+
+
+def remove_server_ban_from_github(guild_id: int) -> bool:
+    if not BAN_SERVERS_GITHUB_REPO or not BAN_SERVERS_GITHUB_PATH:
+        return False
+    raw, _ = _read_github_file(BAN_SERVERS_GITHUB_REPO, BAN_SERVERS_GITHUB_PATH)
+    lines  = [ln for ln in raw.splitlines() if ln.strip()]
+    new_lines, removed = [], False
+    for ln in lines:
+        if ln.startswith("#"):
+            new_lines.append(ln)
+            continue
+        try:
+            if int(ln.split("|")[0].strip()) == guild_id:
+                removed = True
+                continue
+        except (ValueError, IndexError):
+            pass
+        new_lines.append(ln)
+    if not removed:
+        return True
+    return _write_server_ban_list(new_lines)
+
+
+def is_server_banned(guild_id: int) -> bool:
+    return guild_id in _banned_guild_ids
+
+
 def record_ban_attempt(user_id: int) -> int:
     _ban_attempt_counts[user_id] = _ban_attempt_counts.get(user_id, 0) + 1
     count = _ban_attempt_counts[user_id]
@@ -841,6 +928,8 @@ def _build_welcome_embed() -> discord.Embed:
             "`/create` – Generate a Netflix login link | إنشاء رابط نتفليكس\n"
             "`/ban` – Block a user (Admin) | حظر مستخدم (مسؤول)\n"
             "`/unban` – Unblock a user (Admin) | رفع الحظر (مسؤول)\n"
+            "`/banserver` – Ban a server (Admin) | حظر سيرفر (مسؤول)\n"
+            "`/unbanserver` – Unban a server (Admin) | رفع حظر سيرفر (مسؤول)\n"
             "`/channel` – Set bot channel (Admin) | تعيين قناة البوت (مسؤول)\n"
             "`/admin` – Manage bot admins (Admin) | إدارة المشرفين (مسؤول)"
         ),
@@ -1092,6 +1181,21 @@ async def global_interaction_check(interaction: discord.Interaction) -> bool:
         return False
 
     guild_id = interaction.guild.id if interaction.guild else None
+    if guild_id and is_server_banned(guild_id):
+        lang = get_user_lang(interaction)
+        msg  = (
+            "🚫 This server has been banned from using this bot due to a violation of the bot rules."
+            if lang == "en"
+            else "\u200f🚫 تم حظر هذا السيرفر من استخدام البوت بسبب انتهاك قواعد الاستخدام."
+        )
+        cmd_name = interaction.command.name if interaction.command else "?"
+        log.warning(f"🚫 Banned guild {guild_id} tried /{cmd_name} via {interaction.user}")
+        if interaction.response.is_done():
+            await interaction.followup.send(msg, ephemeral=True)
+        else:
+            await interaction.response.send_message(msg, ephemeral=True)
+        return False
+
     if not _guild_allowed(guild_id):
         lang = get_user_lang(interaction)
         msg  = TRANSLATIONS[lang]["wrong_guild"]
@@ -1467,6 +1571,106 @@ async def unban_user(interaction: discord.Interaction, user_id: str) -> None:
     await interaction.followup.send(msg, ephemeral=True)
 
 
+@bot.tree.command(
+    name="banserver",
+    description="🚫 Ban a server from using the bot due to a bot-rule violation (Admin only)",
+)
+@app_commands.describe(
+    guild_id="The Discord server (guild) ID to ban",
+    reason="Reason for the server ban (e.g. bot rule violation)",
+)
+async def ban_server(
+    interaction: discord.Interaction,
+    guild_id: str,
+    reason: str = "Bot rule violation",
+) -> None:
+    lang = get_user_lang(interaction)
+    if not is_admin(interaction.user.id):
+        await interaction.response.send_message(TRANSLATIONS[lang]["not_admin"], ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+    try:
+        gid = int(guild_id.strip())
+    except ValueError:
+        await interaction.followup.send(
+            "❌ Invalid server ID – must be a numeric Discord guild ID.", ephemeral=True
+        )
+        return
+
+    if is_server_banned(gid):
+        await interaction.followup.send(f"⚠️ Server `{gid}` is already banned.", ephemeral=True)
+        return
+
+    guild_name = str(gid)
+    target_guild = bot.get_guild(gid)
+    if target_guild:
+        guild_name = target_guild.name
+
+    _banned_guild_ids.add(gid)
+    success = await asyncio.to_thread(add_server_ban_to_github, gid, guild_name, reason)
+
+    if success:
+        log.info(f"🚫 Admin {interaction.user} banned server '{guild_name}' (ID: {gid}) – reason: {reason}")
+        msg = (
+            f"✅ Server `{guild_name}` (ID: `{gid}`) has been **banned**.\n📋 Reason: {reason}"
+            if lang == "en"
+            else f"\u200f✅ تم حظر السيرفر `{guild_name}` (ID: `{gid}`).\n📋 السبب: {reason}"
+        )
+    else:
+        msg = (
+            f"⚠️ Server `{gid}` banned locally but **GitHub push failed**."
+            if lang == "en"
+            else f"\u200f⚠️ تم الحظر محليًا لكن **فشل الرفع إلى GitHub**."
+        )
+    await interaction.followup.send(msg, ephemeral=True)
+
+
+@bot.tree.command(
+    name="unbanserver",
+    description="✅ Remove a bot ban from a server by its guild ID (Admin only)",
+)
+@app_commands.describe(guild_id="The Discord server (guild) ID to unban")
+async def unban_server(interaction: discord.Interaction, guild_id: str) -> None:
+    lang = get_user_lang(interaction)
+    if not is_admin(interaction.user.id):
+        await interaction.response.send_message(TRANSLATIONS[lang]["not_admin"], ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+    try:
+        gid = int(guild_id.strip())
+    except ValueError:
+        await interaction.followup.send(
+            "❌ Invalid server ID – must be a numeric Discord guild ID.", ephemeral=True
+        )
+        return
+
+    if not is_server_banned(gid):
+        await interaction.followup.send(
+            f"⚠️ Server `{gid}` is not currently banned.", ephemeral=True
+        )
+        return
+
+    _banned_guild_ids.discard(gid)
+    success = await asyncio.to_thread(remove_server_ban_from_github, gid)
+
+    if success:
+        log.info(f"✅ Admin {interaction.user} unbanned server {gid}")
+        msg = (
+            f"✅ Server `{gid}` has been **unbanned**."
+            if lang == "en"
+            else f"\u200f✅ تم رفع الحظر عن السيرفر `{gid}`."
+        )
+    else:
+        msg = (
+            f"⚠️ Server `{gid}` unbanned locally but **GitHub push failed**."
+            if lang == "en"
+            else f"\u200f⚠️ تم رفع الحظر محليًا لكن **فشل الرفع إلى GitHub**."
+        )
+    await interaction.followup.send(msg, ephemeral=True)
+
+
 admin_group = app_commands.Group(
     name="admin",
     description="👮 Manage bot admins",
@@ -1624,6 +1828,10 @@ async def on_ready() -> None:
     global _banned_user_ids
     _banned_user_ids = await asyncio.to_thread(load_banned_users_from_github)
     log.info(f"🚫 Ban list: {len(_banned_user_ids)} banned user(s)")
+
+    global _banned_guild_ids
+    _banned_guild_ids = await asyncio.to_thread(load_banned_servers_from_github)
+    log.info(f"🚫 Server ban list: {len(_banned_guild_ids)} banned server(s)")
 
     global _admin_registry
     _admin_registry = await asyncio.to_thread(load_admins_from_github)
