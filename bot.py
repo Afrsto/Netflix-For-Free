@@ -1,6 +1,6 @@
-# bot.py
 import os
 import json
+import time
 import random
 import asyncio
 import logging
@@ -24,152 +24,209 @@ except ImportError:
 
 from netflix_checker import check_cookie_file
 
-# ╔══════════════════════════════════════════════════════════════╗
-# ║                      CONFIGURATION                           ║
-# ╚══════════════════════════════════════════════════════════════╝
 
-COOKIES_FOLDER         = Path("cookies")   # local fallback (used if GitHub fetch fails)
-SCRIPT_TIMEOUT         = 30
-CONFIG_FILE            = Path("config.json")
-USER_LOG_FILE          = Path("users.txt")     # local fallback (also pushed to GitHub)
-CLEANUP_DELAY_SECONDS  = 60
+COOKIES_FOLDER        = Path("cookies")
+SCRIPT_TIMEOUT        = 30
+CONFIG_FILE           = Path("config.json")
+USER_LOG_FILE         = Path("users.txt")
+CLEANUP_DELAY_SECONDS = 60
 
-DISCORD_BOT_TOKEN = os.environ.get("DISCORD_TOKEN")
-GITHUB_TOKEN      = os.environ.get("GITHUB_TOKEN")
-REMOTE_LOG_URL    = os.environ.get("REMOTE_LOG_URL")
+EGYPT_TZ = ZoneInfo("Africa/Cairo")
 
-# GitHub URL for saving/loading guild→channel link configs (survives bot updates)
-# Set CHANNEL_LOG_URL in environment variables, e.g.:
-CHANNEL_LOG_URL: str | None = os.environ.get("CHANNEL_LOG_URL", "").strip() or None
 
-# GitHub URL for the ban-users.txt file (stores banned user IDs)
-# Example: https://github.com/Afrsto/bot-users/blob/main/ban-users.txt
-BAN_USERS_URL: str | None = os.environ.get(
-    "BAN_USERS_URL",
-    "https://github.com/Afrsto/bot-users/blob/main/ban-users.txt"
-).strip() or None
-
-# Parse CHANNEL_LOG_URL into repo + file path
-CHANNEL_LOG_GITHUB_REPO: str | None = None
-CHANNEL_LOG_GITHUB_PATH: str | None = None
-if CHANNEL_LOG_URL:
-    _clp = urlparse(CHANNEL_LOG_URL)
-    if _clp.netloc == "github.com":
-        _cl_parts = _clp.path.strip("/").split("/")
-        # format: /owner/repo/blob/branch/path/to/file
-        if len(_cl_parts) >= 2:
-            CHANNEL_LOG_GITHUB_REPO = f"{_cl_parts[0]}/{_cl_parts[1]}"
-        if "blob" in _cl_parts:
-            _bi = _cl_parts.index("blob")
-            if _bi + 2 < len(_cl_parts):
-                CHANNEL_LOG_GITHUB_PATH = "/".join(_cl_parts[_bi + 2:])
-
-# Parse BAN_USERS_URL into repo + file path
-BAN_USERS_GITHUB_REPO: str | None = None
-BAN_USERS_GITHUB_PATH: str | None = None
-if BAN_USERS_URL:
-    _bup = urlparse(BAN_USERS_URL)
-    if _bup.netloc == "github.com":
-        _bu_parts = _bup.path.strip("/").split("/")
-        # format: /owner/repo/blob/branch/path/to/file
-        if len(_bu_parts) >= 2:
-            BAN_USERS_GITHUB_REPO = f"{_bu_parts[0]}/{_bu_parts[1]}"
-        if "blob" in _bu_parts:
-            _bui = _bu_parts.index("blob")
-            if _bui + 2 < len(_bu_parts):
-                BAN_USERS_GITHUB_PATH = "/".join(_bu_parts[_bui + 2:])
-
-# GitHub URL for the cookies folder.
-# Set COOKIES_REPO_UR (or COOKIES_REPO_URL) in environment variables, e.g.:
-COOKIES_REPO_URL = (
-    os.environ.get("COOKIES_REPO_UR", "").strip()
-    or os.environ.get("COOKIES_REPO_URL", "").strip()
-    or None
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
+log = logging.getLogger("NetflixBot")
 
-# NEW: Parse cookies GitHub repo + path from COOKIES_REPO_URL
-COOKIES_GITHUB_REPO: str | None = None
-COOKIES_GITHUB_PATH: str | None = None
-COOKIES_GITHUB_BRANCH: str = "main"
 
-if COOKIES_REPO_URL:
-    _cp = urlparse(COOKIES_REPO_URL)
-    if _cp.netloc == "github.com":
-        _parts = _cp.path.strip("/").split("/")
-        # format: /owner/repo/tree/branch/path/to/folder
-        if len(_parts) >= 2:
-            COOKIES_GITHUB_REPO = f"{_parts[0]}/{_parts[1]}"
-        if "tree" in _parts:
-            _ti = _parts.index("tree")
-            if _ti + 1 < len(_parts):
-                COOKIES_GITHUB_BRANCH = _parts[_ti + 1]
-            if _ti + 2 < len(_parts):
-                COOKIES_GITHUB_PATH = "/".join(_parts[_ti + 2:])
-            else:
-                COOKIES_GITHUB_PATH = ""   # root of repo
-
-if COOKIES_GITHUB_REPO:
-    logging.info(f"✅ Cookies source: GitHub {COOKIES_GITHUB_REPO}/{COOKIES_GITHUB_PATH} [{COOKIES_GITHUB_BRANCH}]")
-else:
-    logging.warning("⚠️ Could not parse COOKIES_REPO_URL – falling back to local cookies folder")
-
-# NEW: Support multiple guilds via GUILD_ID_1, GUILD_ID_2, GUILD_ID_3, ...
-ALLOWED_GUILD_IDS: list[int] = []
-for key, value in os.environ.items():
-    if key.startswith("GUILD_ID_") and value and value.strip().isdigit():
-        ALLOWED_GUILD_IDS.append(int(value.strip()))
-
-# UPDATED: Also support legacy GUILD_ID for backwards compatibility
-_legacy_guild = os.environ.get("GUILD_ID", "").strip()
-if _legacy_guild.isdigit() and int(_legacy_guild) not in ALLOWED_GUILD_IDS:
-    ALLOWED_GUILD_IDS.append(int(_legacy_guild))
-
-if not ALLOWED_GUILD_IDS:
-    raise ValueError("❌ No valid GUILD_ID_1 / GUILD_ID_2 / ... environment variables found")
+DISCORD_BOT_TOKEN = os.environ.get("DISCORD_TOKEN", "").strip()
+GITHUB_TOKEN      = os.environ.get("GITHUB_TOKEN", "").strip()
 
 if not DISCORD_BOT_TOKEN:
     raise ValueError("❌ Missing DISCORD_TOKEN environment variable")
 
-# NEW: Default channel ID fallback for Railway (avoids needing /channel after restart)
+ALLOWED_GUILD_IDS: list[int] = []
+for _key, _val in os.environ.items():
+    if _key.startswith("GUILD_ID_") and _val and _val.strip().isdigit():
+        ALLOWED_GUILD_IDS.append(int(_val.strip()))
+
+_legacy_guild = os.environ.get("GUILD_ID", "").strip()
+if _legacy_guild.isdigit() and int(_legacy_guild) not in ALLOWED_GUILD_IDS:
+    ALLOWED_GUILD_IDS.append(int(_legacy_guild))
+
+if ALLOWED_GUILD_IDS:
+    log.info(f"✅ Guild restriction active: {ALLOWED_GUILD_IDS}")
+else:
+    log.info("🌐 No GUILD_ID set – bot will operate in ALL servers it is invited to")
+
 _default_ch = os.environ.get("DEFAULT_CHANNEL_ID", "").strip()
 DEFAULT_CHANNEL_ID: int | None = int(_default_ch) if _default_ch.isdigit() else None
-if DEFAULT_CHANNEL_ID:
-    logging.info(f"✅ DEFAULT_CHANNEL_ID loaded from env: {DEFAULT_CHANNEL_ID}")
-else:
-    logging.warning("⚠️ DEFAULT_CHANNEL_ID not set – /channel command required after restart")
 
-# NEW: PostgreSQL URL (Railway injects this automatically as DATABASE_URL)
 DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
-if DATABASE_URL:
-    logging.info("✅ DATABASE_URL found – persistent PostgreSQL config enabled")
+
+
+def _parse_github_blob_url(url: str) -> tuple[str | None, str | None]:
+    if not url:
+        return None, None
+    p = urlparse(url)
+    if p.netloc != "github.com":
+        return None, None
+    parts = p.path.strip("/").split("/")
+    if len(parts) < 2:
+        return None, None
+    repo = f"{parts[0]}/{parts[1]}"
+    if "blob" in parts:
+        bi = parts.index("blob")
+        if bi + 2 < len(parts):
+            return repo, "/".join(parts[bi + 2:])
+    return repo, None
+
+
+def _parse_github_tree_url(url: str) -> tuple[str | None, str | None, str]:
+    if not url:
+        return None, None, "main"
+    p = urlparse(url)
+    if p.netloc != "github.com":
+        return None, None, "main"
+    parts = p.path.strip("/").split("/")
+    if len(parts) < 2:
+        return None, None, "main"
+    repo   = f"{parts[0]}/{parts[1]}"
+    branch = "main"
+    path   = ""
+    if "tree" in parts:
+        ti = parts.index("tree")
+        if ti + 1 < len(parts):
+            branch = parts[ti + 1]
+        if ti + 2 < len(parts):
+            path = "/".join(parts[ti + 2:])
+    return repo, path, branch
+
+
+REMOTE_LOG_URL  = os.environ.get("REMOTE_LOG_URL", "").strip() or None
+CHANNEL_LOG_URL = os.environ.get("CHANNEL_LOG_URL", "").strip() or None
+BAN_USERS_URL   = os.environ.get(
+    "BAN_USERS_URL",
+    "https://github.com/Afrsto/bot-users/blob/main/ban-users.txt",
+).strip() or None
+ADMIN_USERS_URL = os.environ.get(
+    "ADMIN_USERS_URL",
+    "https://github.com/Afrsto/bot-users/blob/main/admin-users.txt",
+).strip() or None
+COOKIES_REPO_URL = (
+    os.environ.get("COOKIES_REPO_URL", "").strip()
+    or os.environ.get("COOKIES_REPO_UR", "").strip()
+    or None
+)
+
+GITHUB_REPO, GITHUB_FILE_PATH               = _parse_github_blob_url(REMOTE_LOG_URL)
+CHANNEL_LOG_GITHUB_REPO, CHANNEL_LOG_GITHUB_PATH = _parse_github_blob_url(CHANNEL_LOG_URL)
+BAN_USERS_GITHUB_REPO, BAN_USERS_GITHUB_PATH     = _parse_github_blob_url(BAN_USERS_URL)
+ADMIN_USERS_GITHUB_REPO, ADMIN_USERS_GITHUB_PATH = _parse_github_blob_url(ADMIN_USERS_URL)
+COOKIES_GITHUB_REPO, COOKIES_GITHUB_PATH, COOKIES_GITHUB_BRANCH = _parse_github_tree_url(COOKIES_REPO_URL)
+
+if not GITHUB_REPO:
+    log.warning("⚠️ REMOTE_LOG_URL not set or invalid – GitHub user logging disabled")
+if not BAN_USERS_GITHUB_REPO:
+    log.warning("⚠️ BAN_USERS_URL not set – ban system disabled")
+if not ADMIN_USERS_GITHUB_REPO:
+    log.warning("⚠️ ADMIN_USERS_URL not set – custom admin system disabled")
+if COOKIES_GITHUB_REPO:
+    log.info(f"✅ Cookies → GitHub {COOKIES_GITHUB_REPO}/{COOKIES_GITHUB_PATH} [{COOKIES_GITHUB_BRANCH}]")
 else:
-    logging.warning("⚠️ DATABASE_URL not set – config will NOT persist across Railway restarts")
+    log.warning("⚠️ COOKIES_REPO_URL not set – using local cookies folder")
 
-# ────────────────────────────────────────────────────────────────
-# Parse GitHub repo and file path from REMOTE_LOG_URL
-# ────────────────────────────────────────────────────────────────
-GITHUB_REPO = None
-GITHUB_FILE_PATH = None
 
-if REMOTE_LOG_URL:
-    parsed = urlparse(REMOTE_LOG_URL)
-    if parsed.netloc == "github.com":
-        path_parts = parsed.path.strip("/").split("/")
-        if len(path_parts) >= 2:
-            owner_repo = f"{path_parts[0]}/{path_parts[1]}"
-            if "blob" in path_parts:
-                idx = path_parts.index("blob")
-                if idx + 2 < len(path_parts):
-                    GITHUB_FILE_PATH = "/".join(path_parts[idx+2:])
-                    GITHUB_REPO = owner_repo
-    if not GITHUB_REPO:
-        logging.warning("⚠️ Could not parse REMOTE_LOG_URL_D, GitHub logging disabled.")
-else:
-    logging.warning("⚠️ REMOTE_LOG_URL_D not set, GitHub logging disabled.")
+def _gh_client():
+    if not GITHUB_TOKEN:
+        return None
+    return Github(GITHUB_TOKEN)
 
-# ────────────────────────────────────────────────────────────────
-# Locale → Country name + timezone mapping
-# ────────────────────────────────────────────────────────────────
+
+def _get_repo(repo_name: str | None):
+    if not repo_name:
+        return None
+    gh = _gh_client()
+    if not gh:
+        return None
+    try:
+        return gh.get_repo(repo_name)
+    except GithubException as exc:
+        log.error(f"❌ Cannot access GitHub repo {repo_name}: {exc}")
+        return None
+
+
+def _read_github_file(repo_name: str | None, file_path: str | None) -> tuple[str, str | None]:
+    if not repo_name or not file_path:
+        return "", None
+    repo = _get_repo(repo_name)
+    if not repo:
+        return "", None
+    try:
+        contents = repo.get_contents(file_path)
+        raw      = b64decode(contents.content).decode("utf-8")
+        return raw, contents.sha
+    except GithubException as exc:
+        if exc.status == 404:
+            return "", None
+        log.error(f"❌ Failed to read {repo_name}/{file_path}: {exc}")
+        return "", None
+
+
+def _write_github_file(
+    repo_name: str | None,
+    file_path: str | None,
+    content: str,
+    commit_msg: str,
+    max_retries: int = 3,
+) -> bool:
+    if not repo_name or not file_path:
+        return False
+    repo = _get_repo(repo_name)
+    if not repo:
+        return False
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            try:
+                contents    = repo.get_contents(file_path)
+                current_sha = contents.sha
+            except GithubException as exc:
+                if exc.status == 404:
+                    current_sha = None
+                else:
+                    raise
+
+            if current_sha:
+                repo.update_file(file_path, commit_msg, content, current_sha, branch="main")
+            else:
+                repo.create_file(file_path, commit_msg, content, branch="main")
+
+            log.info(f"✅ GitHub write OK ({repo_name}/{file_path}) attempt {attempt}")
+            return True
+
+        except GithubException as exc:
+            status = exc.status
+            msg    = exc.data.get("message", "") if isinstance(exc.data, dict) else str(exc.data)
+            if status in (409, 500, 502, 503) and attempt < max_retries:
+                wait = 1 if status == 409 else 2
+                log.warning(f"⚠️ GitHub write {status} – retry {attempt}/{max_retries} in {wait}s")
+                time.sleep(wait)
+                continue
+            log.error(f"❌ GitHub write failed after {attempt} attempt(s): {status} – {msg}")
+            return False
+        except Exception as exc:
+            log.error(f"❌ Unexpected GitHub write error (attempt {attempt}): {exc}")
+            if attempt < max_retries:
+                time.sleep(1)
+                continue
+            return False
+
+    return False
+
+
 LOCALE_TO_COUNTRY: dict[str, str] = {
     "ar": "Arab Region", "ar-AE": "UAE", "ar-BH": "Bahrain",
     "ar-DZ": "Algeria", "ar-EG": "Egypt", "ar-IQ": "Iraq",
@@ -258,268 +315,242 @@ LOCALE_TO_TZ: dict[str, str] = {
     "uk-UA": "Europe/Kiev",
 }
 
-EGYPT_TZ = ZoneInfo("Africa/Cairo")
-
 
 def get_locale_info(locale_str: str) -> tuple[str, str, str]:
-    """
-    Returns (country_name, local_time_str, tz_name) for the given Discord locale.
-    Falls back gracefully if locale is unknown.
-    """
-    locale = str(locale_str)
-    # Try full locale first, then language prefix
+    locale  = str(locale_str)
     country = LOCALE_TO_COUNTRY.get(locale) or LOCALE_TO_COUNTRY.get(locale.split("-")[0], "Unknown")
     tz_key  = LOCALE_TO_TZ.get(locale) or LOCALE_TO_TZ.get(locale.split("-")[0])
     if tz_key:
         try:
-            tz       = ZoneInfo(tz_key)
-            local_dt = datetime.now(tz)
-            local_time_str = local_dt.strftime("%Y-%m-%d %H:%M:%S")
+            tz             = ZoneInfo(tz_key)
+            local_time_str = datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S")
         except Exception:
             local_time_str = "N/A"
-            tz_key = "Unknown"
+            tz_key         = "Unknown"
     else:
         local_time_str = "N/A"
-        tz_key = "Unknown"
+        tz_key         = "Unknown"
     return country, local_time_str, tz_key
 
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
-)
-log = logging.getLogger("NetflixBot")
-
-# ╔══════════════════════════════════════════════════════════════╗
-# ║              COOKIE FILE ROTATION TRACKER                   ║
-# ╚══════════════════════════════════════════════════════════════╝
-_used_cookie_files: list[Path] = []
+_admin_registry: dict[int, dict] = {}
 
 
-def pick_cookie_file(txt_files: list[Path]) -> Path:
-    """
-    Pick a random .txt cookie file with round‑robin rotation.
-    Once all files have been used, the list resets so files can be
-    selected again – this works perfectly even when only one file exists.
-    """
-    global _used_cookie_files
-
-    # Remove entries that no longer exist on disk
-    _used_cookie_files = [f for f in _used_cookie_files if f in txt_files]
-
-    remaining = [f for f in txt_files if f not in _used_cookie_files]
-
-    if not remaining:
-        log.info("🔄 All cookie files have been used. Resetting rotation.")
-        _used_cookie_files.clear()
-        remaining = list(txt_files)
-
-    chosen = random.choice(remaining)
-    _used_cookie_files.append(chosen)
-    log.info(f"📂 Picked cookie file: {chosen.name}  "
-             f"({len(_used_cookie_files)}/{len(txt_files)} used in this rotation)")
-    return chosen
-
-
-# ╔══════════════════════════════════════════════════════════════╗
-# ║                   GITHUB HELPER FUNCTIONS                   ║
-# ╚══════════════════════════════════════════════════════════════╝
-def get_github_repo():
-    """Return the GitHub repository object, or None if token or repo config is missing."""
-    if not GITHUB_TOKEN or not GITHUB_REPO:
-        return None
-    g = Github(GITHUB_TOKEN)
-    return g.get_repo(GITHUB_REPO)
-
-
-def update_users_txt_on_github(new_line: str, max_retries: int = 3) -> bool:
-    """
-    Append a line to the remote users.txt file defined by REMOTE_LOG_URL.
-    Improvements:
-    - Retry up to max_retries times on transient GitHub API failures.
-    - Re-fetches SHA before each retry to avoid stale-SHA conflicts (409).
-    - Returns True on success, False on permanent failure.
-    - Keeps file to a rolling 500-line maximum to avoid unbounded growth.
-    """
-    if not GITHUB_REPO or not GITHUB_FILE_PATH:
-        log.debug("GitHub logging disabled – missing repo or file path.")
-        return False
-
-    repo = get_github_repo()
-    if not repo:
-        log.warning("GitHub repo not available – log not pushed.")
-        return False
-
-    for attempt in range(1, max_retries + 1):
+def load_admins_from_github() -> dict[int, dict]:
+    raw, _ = _read_github_file(ADMIN_USERS_GITHUB_REPO, ADMIN_USERS_GITHUB_PATH)
+    registry: dict[int, dict] = {}
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
         try:
-            # Always fetch the latest SHA to avoid 409 conflicts on concurrent writes
-            try:
-                contents        = repo.get_contents(GITHUB_FILE_PATH)
-                current_content = b64decode(contents.content).decode("utf-8")
-                current_sha     = contents.sha
-            except GithubException as e:
-                if e.status == 404:
-                    current_content = ""
-                    current_sha     = None
-                    log.info(f"📄 {GITHUB_FILE_PATH} does not exist – will create it.")
-                else:
-                    raise   # propagate to retry handler
+            parts = {kv.split("=", 1)[0].strip(): kv.split("=", 1)[1].strip()
+                     for kv in line.split("|") if "=" in kv}
+            uid = int(parts.get("user_id", "0"))
+            if uid:
+                registry[uid] = {
+                    "username": parts.get("username", str(uid)),
+                    "added_by": parts.get("added_by", "system"),
+                    "added_at": parts.get("added_at", "unknown"),
+                }
+        except Exception:
+            continue
+    log.info(f"👮 Loaded {len(registry)} admin(s) from GitHub")
+    return registry
 
-            # Rolling limit: keep only the last 499 lines + the new one
-            lines = current_content.splitlines(keepends=True)
-            if len(lines) >= 500:
-                lines = lines[-(499):]
-                log.info("🗂️ users.txt trimmed to 500 lines (rolling log).")
-            new_content = "".join(lines) + new_line
 
-            if current_sha:
-                repo.update_file(
-                    path=GITHUB_FILE_PATH,
-                    message=f"📝 Log entry [{datetime.now(EGYPT_TZ).strftime('%Y-%m-%d %H:%M')} EGY]",
-                    content=new_content,
-                    sha=current_sha,
-                    branch="main",
-                )
-            else:
-                repo.create_file(
-                    path=GITHUB_FILE_PATH,
-                    message="🆕 Create users.txt with initial log",
-                    content=new_content,
-                    branch="main",
-                )
+def _serialize_admins(registry: dict[int, dict]) -> str:
+    lines = ["# Admin users – managed automatically by the bot", ""]
+    for uid, info in registry.items():
+        lines.append(
+            f"user_id={uid} | username={info['username']} "
+            f"| added_by={info['added_by']} | added_at={info['added_at']}"
+        )
+    return "\n".join(lines) + "\n"
 
-            log.info(f"✅ GitHub log pushed (attempt {attempt}): {new_line.strip()[:80]}")
-            return True
 
-        except GithubException as e:
-            status  = e.status
-            message = e.data.get("message", "") if isinstance(e.data, dict) else str(e.data)
-            if status == 409 and attempt < max_retries:
-                # SHA conflict – wait briefly and retry with fresh SHA
-                import time
-                log.warning(f"⚠️ GitHub SHA conflict (409) – retry {attempt}/{max_retries} in 1s")
-                time.sleep(1)
+def save_admins_to_github(registry: dict[int, dict]) -> bool:
+    content = _serialize_admins(registry)
+    now_str = datetime.now(EGYPT_TZ).strftime("%Y-%m-%d %H:%M")
+    return _write_github_file(
+        ADMIN_USERS_GITHUB_REPO,
+        ADMIN_USERS_GITHUB_PATH,
+        content,
+        f"👮 Update admin list [{now_str} EGY]",
+    )
+
+
+BOT_OWNER_ID:   int = 994817247061225633
+BOT_COADMIN_ID: int = 1138625081942233273
+
+_PRIVILEGED_IDS: frozenset[int] = frozenset({BOT_OWNER_ID, BOT_COADMIN_ID})
+
+
+def is_admin(user_id: int) -> bool:
+    return user_id in _PRIVILEGED_IDS or user_id in _admin_registry
+
+
+def is_owner(user_id: int) -> bool:
+    return user_id == BOT_OWNER_ID
+
+
+_banned_user_ids:   set[int]      = set()
+_ban_attempt_counts: dict[int, int] = {}
+
+
+def load_banned_users_from_github() -> set[int]:
+    if not BAN_USERS_GITHUB_REPO or not BAN_USERS_GITHUB_PATH:
+        log.warning("⚠️ BAN_USERS_URL not configured – ban list disabled")
+        return set()
+    raw, _ = _read_github_file(BAN_USERS_GITHUB_REPO, BAN_USERS_GITHUB_PATH)
+    banned: set[int] = set()
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        try:
+            banned.add(int(line.split("|")[0].strip()))
+        except (ValueError, IndexError):
+            continue
+    log.info(f"🚫 Loaded {len(banned)} banned user(s)")
+    return banned
+
+
+def _write_ban_list(lines: list[str]) -> bool:
+    content = "\n".join(lines) + ("\n" if lines else "")
+    now_str = datetime.now(EGYPT_TZ).strftime("%Y-%m-%d %H:%M")
+    return _write_github_file(
+        BAN_USERS_GITHUB_REPO,
+        BAN_USERS_GITHUB_PATH,
+        content,
+        f"🚫 Update ban list [{now_str} EGY]",
+    )
+
+
+def add_ban_to_github(user_id: int, username: str) -> bool:
+    if not BAN_USERS_GITHUB_REPO or not BAN_USERS_GITHUB_PATH:
+        return False
+    raw, _ = _read_github_file(BAN_USERS_GITHUB_REPO, BAN_USERS_GITHUB_PATH)
+    lines  = [ln for ln in raw.splitlines() if ln.strip()]
+    for ln in lines:
+        if ln.startswith("#"):
+            continue
+        try:
+            if int(ln.split("|")[0].strip()) == user_id:
+                log.info(f"ℹ️ User {user_id} already in ban list")
+                return True
+        except (ValueError, IndexError):
+            continue
+    now_str = datetime.now(EGYPT_TZ).strftime("%Y-%m-%d %H:%M:%S")
+    lines.append(f"{user_id} | username={username} | banned_at={now_str} | attempts=0")
+    return _write_ban_list(lines)
+
+
+def remove_ban_from_github(user_id: int) -> bool:
+    if not BAN_USERS_GITHUB_REPO or not BAN_USERS_GITHUB_PATH:
+        return False
+    raw, _ = _read_github_file(BAN_USERS_GITHUB_REPO, BAN_USERS_GITHUB_PATH)
+    lines  = [ln for ln in raw.splitlines() if ln.strip()]
+    new_lines, removed = [], False
+    for ln in lines:
+        if ln.startswith("#"):
+            new_lines.append(ln)
+            continue
+        try:
+            if int(ln.split("|")[0].strip()) == user_id:
+                removed = True
                 continue
-            elif status in (500, 502, 503) and attempt < max_retries:
-                import time
-                log.warning(f"⚠️ GitHub server error {status} – retry {attempt}/{max_retries} in 2s")
-                time.sleep(2)
+        except (ValueError, IndexError):
+            pass
+        new_lines.append(ln)
+    if not removed:
+        return True
+    return _write_ban_list(new_lines)
+
+
+def update_ban_attempts_on_github(user_id: int, attempts: int) -> None:
+    if not BAN_USERS_GITHUB_REPO or not BAN_USERS_GITHUB_PATH:
+        return
+    raw, _ = _read_github_file(BAN_USERS_GITHUB_REPO, BAN_USERS_GITHUB_PATH)
+    lines, updated = raw.splitlines(), False
+    new_lines = []
+    for ln in lines:
+        stripped = ln.strip()
+        if not stripped or stripped.startswith("#"):
+            new_lines.append(ln)
+            continue
+        try:
+            if int(stripped.split("|")[0].strip()) == user_id:
+                parts     = [p.strip() for p in stripped.split("|")]
+                new_parts = [f"attempts={attempts}" if p.startswith("attempts=") else p for p in parts]
+                new_lines.append(" | ".join(new_parts))
+                updated = True
                 continue
-            else:
-                log.error(f"❌ GitHub commit failed after {attempt} attempt(s): {status} – {message}")
-                return False
-        except Exception as e:
-            log.error(f"❌ Unexpected error pushing to GitHub (attempt {attempt}): {e}")
-            if attempt < max_retries:
-                import time
-                time.sleep(1)
-                continue
-            return False
-
-    return False
+        except (ValueError, IndexError):
+            pass
+        new_lines.append(ln)
+    if updated:
+        _write_ban_list(new_lines)
 
 
-# ╔══════════════════════════════════════════════════════════════╗
-# ║         GITHUB CHANNEL-LINK LOG  (logs.txt)                 ║
-# ║  Persists guild→channel mappings so /channel survives       ║
-# ║  bot updates without needing to be re-run.                  ║
-# ╚══════════════════════════════════════════════════════════════╝
-
-_channel_log_sha: str | None = None
+def is_user_banned(user_id: int) -> bool:
+    return user_id in _banned_user_ids
 
 
-def _get_channel_log_repo():
-    """Return the GitHub repo object for the channel log, or None."""
-    if not GITHUB_TOKEN or not CHANNEL_LOG_GITHUB_REPO:
-        return None
-    g = Github(GITHUB_TOKEN)
-    return g.get_repo(CHANNEL_LOG_GITHUB_REPO)
+def record_ban_attempt(user_id: int) -> int:
+    _ban_attempt_counts[user_id] = _ban_attempt_counts.get(user_id, 0) + 1
+    count = _ban_attempt_counts[user_id]
+    try:
+        loop = asyncio.get_running_loop()
+        loop.run_in_executor(None, update_ban_attempts_on_github, user_id, count)
+    except RuntimeError:
+        pass
+    return count
+
+
+def update_users_txt_on_github(new_line: str) -> bool:
+    if not GITHUB_REPO or not GITHUB_FILE_PATH:
+        log.debug("GitHub logging disabled")
+        return False
+    raw, _ = _read_github_file(GITHUB_REPO, GITHUB_FILE_PATH)
+    lines  = raw.splitlines(keepends=True)
+    if len(lines) >= 500:
+        lines = lines[-499:]
+        log.info("🗂️ users.txt trimmed to 500 lines")
+    content = "".join(lines) + new_line
+    now_str = datetime.now(EGYPT_TZ).strftime("%Y-%m-%d %H:%M")
+    return _write_github_file(
+        GITHUB_REPO,
+        GITHUB_FILE_PATH,
+        content,
+        f"📝 Log entry [{now_str} EGY]",
+    )
 
 
 def save_channel_link_to_github(guild_id: int, guild_name: str, channel_id: int, channel_name: str) -> None:
-    """
-    Append a CHANNEL_LINK entry to logs.txt on GitHub.
-    Format (one per line):
-        CHANNEL_LINK | guild_id=... | guild_name=... | channel_id=... | channel_name=... | set_at=...
-    Older entries for the same guild are replaced so the file stays clean.
-    """
     if not CHANNEL_LOG_GITHUB_REPO or not CHANNEL_LOG_GITHUB_PATH:
-        log.warning("⚠️ Channel-log GitHub target not configured – skip save.")
         return
-
-    repo = _get_channel_log_repo()
-    if not repo:
-        log.warning("⚠️ Channel-log GitHub repo unavailable – skip save.")
-        return
-
-    global _channel_log_sha
-    now_str = datetime.now(EGYPT_TZ).strftime("%Y-%m-%d %H:%M:%S")
+    raw, _ = _read_github_file(CHANNEL_LOG_GITHUB_REPO, CHANNEL_LOG_GITHUB_PATH)
+    now_str   = datetime.now(EGYPT_TZ).strftime("%Y-%m-%d %H:%M:%S")
     new_entry = (
         f"CHANNEL_LINK | guild_id={guild_id} | guild_name={guild_name} | "
         f"channel_id={channel_id} | channel_name={channel_name} | set_at={now_str}\n"
     )
-
-    try:
-        try:
-            contents = repo.get_contents(CHANNEL_LOG_GITHUB_PATH)
-            raw = b64decode(contents.content).decode("utf-8")
-            _channel_log_sha = contents.sha
-        except GithubException as e:
-            if e.status == 404:
-                raw = ""
-                _channel_log_sha = None
-            else:
-                log.error(f"❌ channel-log get_contents error: {e}")
-                return
-
-        # Remove any previous entry for this guild so there are no duplicates
-        lines = [ln for ln in raw.splitlines(keepends=True)
-                 if not (ln.startswith("CHANNEL_LINK") and f"guild_id={guild_id}" in ln)]
-        lines.append(new_entry)
-        new_content = "".join(lines)
-
-        if _channel_log_sha:
-            repo.update_file(
-                path=CHANNEL_LOG_GITHUB_PATH,
-                message=f"📌 Update channel link: guild {guild_id} → channel {channel_id}",
-                content=new_content,
-                sha=_channel_log_sha,
-                branch="main",
-            )
-        else:
-            repo.create_file(
-                path=CHANNEL_LOG_GITHUB_PATH,
-                message=f"🆕 Create logs.txt with channel link: guild {guild_id}",
-                content=new_content,
-                branch="main",
-            )
-        log.info(f"✅ Channel link saved to GitHub logs.txt: guild {guild_id} → channel {channel_id}")
-    except GithubException as e:
-        log.error(f"❌ Failed to save channel link to GitHub: {e.status} – {e.data.get('message', '')}")
+    lines = [ln for ln in raw.splitlines(keepends=True)
+             if not (ln.startswith("CHANNEL_LINK") and f"guild_id={guild_id}" in ln)]
+    lines.append(new_entry)
+    _write_github_file(
+        CHANNEL_LOG_GITHUB_REPO,
+        CHANNEL_LOG_GITHUB_PATH,
+        "".join(lines),
+        f"📌 Update channel link: guild {guild_id} → channel {channel_id}",
+    )
 
 
 def load_channel_links_from_github() -> dict[str, int]:
-    """
-    Read logs.txt from GitHub and return a dict of {str(guild_id): channel_id}
-    for every CHANNEL_LINK line found. Returns empty dict on any error.
-    """
     if not CHANNEL_LOG_GITHUB_REPO or not CHANNEL_LOG_GITHUB_PATH:
         return {}
-
-    repo = _get_channel_log_repo()
-    if not repo:
-        return {}
-
-    try:
-        contents = repo.get_contents(CHANNEL_LOG_GITHUB_PATH)
-        raw = b64decode(contents.content).decode("utf-8")
-    except GithubException as e:
-        if e.status == 404:
-            log.info("ℹ️ logs.txt not found on GitHub – no channel links to restore.")
-        else:
-            log.error(f"❌ Failed to read logs.txt from GitHub: {e}")
-        return {}
-
+    raw, _ = _read_github_file(CHANNEL_LOG_GITHUB_REPO, CHANNEL_LOG_GITHUB_PATH)
     result: dict[str, int] = {}
     for line in raw.splitlines():
         if not line.startswith("CHANNEL_LINK"):
@@ -527,443 +558,79 @@ def load_channel_links_from_github() -> dict[str, int]:
         try:
             parts = {kv.split("=", 1)[0].strip(): kv.split("=", 1)[1].strip()
                      for kv in line.split("|")[1:] if "=" in kv}
-            gid = parts["guild_id"]
-            cid = int(parts["channel_id"])
-            result[gid] = cid
+            result[parts["guild_id"]] = int(parts["channel_id"])
         except Exception:
-            continue  # malformed line – skip silently
-
-    log.info(f"📥 Loaded {len(result)} channel link(s) from GitHub logs.txt: {result}")
+            continue
+    log.info(f"📥 Loaded {len(result)} channel link(s) from GitHub logs.txt")
     return result
 
 
-# ╔══════════════════════════════════════════════════════════════╗
-# ║                   BAN SYSTEM                                ║
-# ║  Stores banned user IDs in ban-users.txt on GitHub.        ║
-# ║  Tracks how many times a banned user tries to use the bot. ║
-# ╚══════════════════════════════════════════════════════════════╝
-
-# In-memory cache: set of banned user IDs (int)
-_banned_user_ids: set[int] = set()
-
-# In-memory attempt counter: user_id → number of blocked attempts since ban
-_ban_attempt_counts: dict[int, int] = {}
+_used_cookie_files:        list[Path] = []
+_used_github_cookie_names: list[str]  = []
 
 
-def _get_ban_repo():
-    """Return the GitHub repo object for ban-users.txt, or None."""
-    if not GITHUB_TOKEN or not BAN_USERS_GITHUB_REPO:
-        return None
-    try:
-        g = Github(GITHUB_TOKEN)
-        return g.get_repo(BAN_USERS_GITHUB_REPO)
-    except GithubException as e:
-        log.error(f"❌ Cannot access ban-users repo {BAN_USERS_GITHUB_REPO}: {e}")
-        return None
+def pick_cookie_file(txt_files: list[Path]) -> Path:
+    global _used_cookie_files
+    _used_cookie_files = [f for f in _used_cookie_files if f in txt_files]
+    remaining = [f for f in txt_files if f not in _used_cookie_files]
+    if not remaining:
+        log.info("🔄 All cookie files used – resetting rotation")
+        _used_cookie_files.clear()
+        remaining = list(txt_files)
+    chosen = random.choice(remaining)
+    _used_cookie_files.append(chosen)
+    return chosen
 
 
-def load_banned_users_from_github() -> set[int]:
-    """
-    Read ban-users.txt from GitHub and return a set of banned user IDs.
-    File format – one entry per line:
-        <user_id> | username=... | banned_at=... | attempts=...
-    Lines starting with # are comments/headers and are ignored.
-    Returns empty set on any error or if the file doesn't exist yet.
-    """
-    if not BAN_USERS_GITHUB_REPO or not BAN_USERS_GITHUB_PATH:
-        log.warning("⚠️ BAN_USERS_URL not configured – ban list disabled.")
-        return set()
-
-    repo = _get_ban_repo()
-    if not repo:
-        return set()
-
-    try:
-        contents = repo.get_contents(BAN_USERS_GITHUB_PATH)
-        raw = b64decode(contents.content).decode("utf-8")
-    except GithubException as e:
-        if e.status == 404:
-            log.info("ℹ️ ban-users.txt not found on GitHub – starting with empty ban list.")
-        else:
-            log.error(f"❌ Failed to read ban-users.txt from GitHub: {e}")
-        return set()
-
-    banned: set[int] = set()
-    for line in raw.splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        try:
-            uid = int(line.split("|")[0].strip())
-            banned.add(uid)
-        except (ValueError, IndexError):
-            continue  # malformed line – skip silently
-
-    log.info(f"🚫 Loaded {len(banned)} banned user(s) from GitHub ban-users.txt: {banned}")
-    return banned
-
-
-def _write_ban_list_to_github(lines: list[str]) -> bool:
-    """
-    Overwrite ban-users.txt on GitHub with the given lines.
-    Returns True on success, False on failure.
-    """
-    if not BAN_USERS_GITHUB_REPO or not BAN_USERS_GITHUB_PATH:
-        return False
-
-    repo = _get_ban_repo()
-    if not repo:
-        return False
-
-    new_content = "\n".join(lines) + ("\n" if lines else "")
-
-    for attempt in range(1, 4):
-        try:
-            try:
-                contents = repo.get_contents(BAN_USERS_GITHUB_PATH)
-                current_sha = contents.sha
-            except GithubException as e:
-                if e.status == 404:
-                    current_sha = None
-                else:
-                    raise
-
-            now_str = datetime.now(EGYPT_TZ).strftime("%Y-%m-%d %H:%M")
-            if current_sha:
-                repo.update_file(
-                    path=BAN_USERS_GITHUB_PATH,
-                    message=f"🚫 Update ban list [{now_str} EGY]",
-                    content=new_content,
-                    sha=current_sha,
-                    branch="main",
-                )
-            else:
-                repo.create_file(
-                    path=BAN_USERS_GITHUB_PATH,
-                    message=f"🆕 Create ban-users.txt [{now_str} EGY]",
-                    content=new_content,
-                    branch="main",
-                )
-            log.info(f"✅ ban-users.txt pushed to GitHub (attempt {attempt})")
-            return True
-
-        except GithubException as e:
-            if e.status == 409 and attempt < 3:
-                import time
-                time.sleep(1.5 * attempt)
-                continue
-            log.error(f"❌ Failed to write ban-users.txt (attempt {attempt}): {e.status} – {e.data}")
-            return False
-    return False
-
-
-def add_ban_to_github(user_id: int, username: str) -> bool:
-    """
-    Append a new ban entry to ban-users.txt on GitHub.
-    Skips if the user is already present.
-    Entry format:
-        <user_id> | username=<name> | banned_at=<timestamp> | attempts=0
-    """
-    if not BAN_USERS_GITHUB_REPO or not BAN_USERS_GITHUB_PATH:
-        return False
-
-    repo = _get_ban_repo()
-    if not repo:
-        return False
-
-    try:
-        try:
-            contents = repo.get_contents(BAN_USERS_GITHUB_PATH)
-            raw = b64decode(contents.content).decode("utf-8")
-        except GithubException as e:
-            if e.status == 404:
-                raw = ""
-            else:
-                raise
-
-        lines = [ln for ln in raw.splitlines() if ln.strip()]
-
-        # Check for duplicate
-        for ln in lines:
-            if not ln.strip() or ln.startswith("#"):
-                continue
-            try:
-                if int(ln.split("|")[0].strip()) == user_id:
-                    log.info(f"ℹ️ User {user_id} already in ban list – skip add.")
-                    return True
-            except (ValueError, IndexError):
-                continue
-
-        now_str = datetime.now(EGYPT_TZ).strftime("%Y-%m-%d %H:%M:%S")
-        new_entry = f"{user_id} | username={username} | banned_at={now_str} | attempts=0"
-        lines.append(new_entry)
-        return _write_ban_list_to_github(lines)
-
-    except GithubException as e:
-        log.error(f"❌ add_ban_to_github failed: {e}")
-        return False
-
-
-def remove_ban_from_github(user_id: int) -> bool:
-    """Remove a user's ban entry from ban-users.txt on GitHub."""
-    if not BAN_USERS_GITHUB_REPO or not BAN_USERS_GITHUB_PATH:
-        return False
-
-    repo = _get_ban_repo()
-    if not repo:
-        return False
-
-    try:
-        try:
-            contents = repo.get_contents(BAN_USERS_GITHUB_PATH)
-            raw = b64decode(contents.content).decode("utf-8")
-        except GithubException as e:
-            if e.status == 404:
-                return True  # nothing to remove
-            raise
-
-        lines = [ln for ln in raw.splitlines() if ln.strip()]
-        new_lines = []
-        removed = False
-        for ln in lines:
-            if ln.startswith("#"):
-                new_lines.append(ln)
-                continue
-            try:
-                if int(ln.split("|")[0].strip()) == user_id:
-                    removed = True
-                    continue  # drop this line
-            except (ValueError, IndexError):
-                pass
-            new_lines.append(ln)
-
-        if not removed:
-            log.info(f"ℹ️ User {user_id} was not in ban-users.txt.")
-            return True
-
-        return _write_ban_list_to_github(new_lines)
-
-    except GithubException as e:
-        log.error(f"❌ remove_ban_from_github failed: {e}")
-        return False
-
-
-def update_ban_attempts_on_github(user_id: int, attempts: int) -> None:
-    """
-    Update the `attempts=N` counter for a banned user in ban-users.txt.
-    Called in a background thread so it never blocks the bot.
-    """
-    if not BAN_USERS_GITHUB_REPO or not BAN_USERS_GITHUB_PATH:
-        return
-
-    repo = _get_ban_repo()
-    if not repo:
-        return
-
-    try:
-        try:
-            contents = repo.get_contents(BAN_USERS_GITHUB_PATH)
-            raw = b64decode(contents.content).decode("utf-8")
-        except GithubException as e:
-            if e.status == 404:
-                return
-            raise
-
-        lines = raw.splitlines()
-        new_lines = []
-        updated = False
-        for ln in lines:
-            stripped = ln.strip()
-            if not stripped or stripped.startswith("#"):
-                new_lines.append(ln)
-                continue
-            try:
-                uid = int(stripped.split("|")[0].strip())
-                if uid == user_id:
-                    # Replace the attempts= field
-                    parts = [p.strip() for p in stripped.split("|")]
-                    new_parts = []
-                    for p in parts:
-                        if p.startswith("attempts="):
-                            new_parts.append(f"attempts={attempts}")
-                        else:
-                            new_parts.append(p)
-                    new_lines.append(" | ".join(new_parts))
-                    updated = True
-                    continue
-            except (ValueError, IndexError):
-                pass
-            new_lines.append(ln)
-
-        if updated:
-            _write_ban_list_to_github(new_lines)
-            log.info(f"📊 Updated attempts for banned user {user_id} → {attempts}")
-
-    except GithubException as e:
-        log.error(f"❌ update_ban_attempts_on_github failed: {e}")
-
-
-def is_user_banned(user_id: int) -> bool:
-    """Fast O(1) check using the in-memory cache."""
-    return user_id in _banned_user_ids
-
-
-def record_ban_attempt(user_id: int) -> int:
-    """
-    Increment and return the attempt count for a banned user.
-    Schedules a background GitHub update every attempt.
-    """
-    _ban_attempt_counts[user_id] = _ban_attempt_counts.get(user_id, 0) + 1
-    count = _ban_attempt_counts[user_id]
-    # Push the updated count to GitHub asynchronously (safe from any context)
-    try:
-        loop = asyncio.get_running_loop()
-        loop.run_in_executor(None, update_ban_attempts_on_github, user_id, count)
-    except RuntimeError:
-        pass  # no running loop — attempt count will sync on next write
-    return count
-
-
-# ╔══════════════════════════════════════════════════════════════╗
-# ║           GITHUB COOKIES FETCHER  (NEW)                     ║
-# ║  Fetches .txt cookie files from the GitHub cookies folder   ║
-# ║  so Railway doesn't need a local cookies/ directory.        ║
-# ╚══════════════════════════════════════════════════════════════╝
-
-# In-memory cache: filename → raw text content
-_github_cookie_cache: dict[str, str] = {}
+def pick_github_cookie_rotation(filenames: list[str]) -> str:
+    global _used_github_cookie_names
+    _used_github_cookie_names = [f for f in _used_github_cookie_names if f in filenames]
+    remaining = [f for f in filenames if f not in _used_github_cookie_names]
+    if not remaining:
+        log.info("🔄 All GitHub cookie files used – resetting rotation")
+        _used_github_cookie_names.clear()
+        remaining = list(filenames)
+    chosen = random.choice(remaining)
+    _used_github_cookie_names.append(chosen)
+    return chosen
 
 
 def _get_cookies_repo():
-    """Return the GitHub repo object used for cookie files."""
-    if not GITHUB_TOKEN or not COOKIES_GITHUB_REPO:
-        return None
-    try:
-        g = Github(GITHUB_TOKEN)
-        return g.get_repo(COOKIES_GITHUB_REPO)
-    except GithubException as e:
-        log.error(f"❌ Cannot access cookies repo {COOKIES_GITHUB_REPO}: {e}")
-        return None
-
-
-def fetch_github_cookie_list() -> list[str]:
-    """
-    NEW: Return a list of .txt filenames found in the GitHub cookies folder.
-    Uses PyGitHub to list the folder contents.
-    Falls back to [] on any error.
-    """
-    repo = _get_cookies_repo()
-    if not repo:
-        return []
-    try:
-        folder_path = COOKIES_GITHUB_PATH or ""
-        contents = repo.get_contents(folder_path, ref=COOKIES_GITHUB_BRANCH)
-        txt_files = [
-            c.name for c in contents
-            if c.type == "file" and c.name.endswith(".txt")
-        ]
-        log.info(f"📂 GitHub cookies folder has {len(txt_files)} .txt file(s): {txt_files}")
-        return txt_files
-    except GithubException as e:
-        log.error(f"❌ Failed to list GitHub cookies folder: {e}")
-        return []
-
-
-def fetch_github_cookie_content(filename: str) -> str | None:
-    """
-    NEW: Download and return the raw text content of a single cookie file
-    from the GitHub cookies folder.
-    Returns None on failure.
-    """
-    repo = _get_cookies_repo()
-    if not repo:
-        return None
-    try:
-        folder_path = COOKIES_GITHUB_PATH or ""
-        file_path   = f"{folder_path}/{filename}".lstrip("/")
-        content_obj = repo.get_contents(file_path, ref=COOKIES_GITHUB_BRANCH)
-        raw = b64decode(content_obj.content).decode("utf-8")
-        log.info(f"✅ Downloaded cookie file from GitHub: {filename} ({len(raw)} bytes)")
-        return raw
-    except GithubException as e:
-        log.error(f"❌ Failed to download cookie file {filename}: {e}")
-        return None
+    return _get_repo(COOKIES_GITHUB_REPO)
 
 
 def _fetch_github_cookie_list_in_path(folder_path: str) -> list[str]:
-    """
-    List .txt filenames in a specific subfolder path inside the GitHub cookies repo.
-    Used by generate_link() for quality-based subfolder routing.
-    """
     repo = _get_cookies_repo()
     if not repo:
         return []
     try:
         contents = repo.get_contents(folder_path, ref=COOKIES_GITHUB_BRANCH)
-        txt_files = [
-            c.name for c in contents
-            if c.type == "file" and c.name.endswith(".txt")
-        ]
-        log.info(f"📂 GitHub {folder_path}: {len(txt_files)} .txt file(s): {txt_files}")
-        return txt_files
-    except GithubException as e:
-        log.error(f"❌ Failed to list GitHub path {folder_path}: {e}")
+        return [c.name for c in contents if c.type == "file" and c.name.endswith(".txt")]
+    except GithubException as exc:
+        log.error(f"❌ Failed to list GitHub path {folder_path}: {exc}")
         return []
 
 
 def _fetch_github_cookie_content_in_path(folder_path: str, filename: str) -> str | None:
-    """
-    Download a single .txt cookie file from a specific subfolder path in the GitHub repo.
-    Used by generate_link() for quality-based subfolder routing.
-    """
     repo = _get_cookies_repo()
     if not repo:
         return None
     try:
         file_path   = f"{folder_path.rstrip('/')}/{filename}"
         content_obj = repo.get_contents(file_path, ref=COOKIES_GITHUB_BRANCH)
-        raw = b64decode(content_obj.content).decode("utf-8")
-        log.info(f"✅ Downloaded GitHub cookie: {file_path} ({len(raw)} bytes)")
-        return raw
-    except GithubException as e:
-        log.error(f"❌ Failed to download {folder_path}/{filename}: {e}")
+        return b64decode(content_obj.content).decode("utf-8")
+    except GithubException as exc:
+        log.error(f"❌ Failed to download {folder_path}/{filename}: {exc}")
         return None
 
 
-
-    """
-    NEW: Round-robin cookie selection over GitHub filenames (strings, not Paths).
-    Mirrors the logic of pick_cookie_file() but works with filename strings.
-    """
-    global _used_cookie_files
-    # Reuse the same _used_cookie_files list but store filenames as fake Paths
-    # Use a separate global for GitHub names to keep things clean.
-    return random.choice(filenames)   # simple random for GitHub files
+QUALITY_FOLDER_MAP: dict[str, str] = {
+    "hd":  "Basic",
+    "fhd": "Standard",
+    "uhd": "Premium",
+}
 
 
-# NEW: separate rotation tracker for GitHub cookie names
-_used_github_cookie_names: list[str] = []
-
-
-def pick_github_cookie_rotation(filenames: list[str]) -> str:
-    """Round-robin selection over GitHub cookie filenames."""
-    global _used_github_cookie_names
-
-    # Remove filenames that no longer exist
-    _used_github_cookie_names = [f for f in _used_github_cookie_names if f in filenames]
-
-    remaining = [f for f in filenames if f not in _used_github_cookie_names]
-    if not remaining:
-        log.info("🔄 All GitHub cookie files used – resetting rotation.")
-        _used_github_cookie_names.clear()
-        remaining = list(filenames)
-
-    chosen = random.choice(remaining)
-    _used_github_cookie_names.append(chosen)
-    log.info(f"🎯 GitHub cookie picked: {chosen}  "
-             f"({len(_used_github_cookie_names)}/{len(filenames)} used this rotation)")
-    return chosen
-# ╚══════════════════════════════════════════════════════════════╝
 async def log_user_activity(
     interaction: discord.Interaction,
     condition: str,
@@ -972,65 +639,36 @@ async def log_user_activity(
     language: str | None = None,
     quality: str | None = None,
 ) -> None:
-    """Append a structured log entry locally and push to GitHub."""
-    now_egypt = datetime.now(EGYPT_TZ).strftime("%Y-%m-%d %H:%M:%S")
-    user      = interaction.user
-    guild     = interaction.guild
-
-    # Rich user information
-    username      = str(user)
-    display_name  = user.display_name
-    user_id       = user.id
-    account_since = user.created_at.strftime("%Y-%m-%d")
-    server_name   = guild.name if guild else "DM"
-    server_id     = guild.id   if guild else "N/A"
-
-    # ── Locale → country + local time ─────────────────────────────────
-    locale_str = str(interaction.locale) if interaction.locale else "en"
+    now_egypt    = datetime.now(EGYPT_TZ).strftime("%Y-%m-%d %H:%M:%S")
+    user         = interaction.user
+    guild        = interaction.guild
+    locale_str   = str(interaction.locale) if interaction.locale else "en"
     country_name, local_time, local_tz = get_locale_info(locale_str)
 
-    # ── Fetch fresh member data to avoid cache issues ─────────────────
-    member_since        = "N/A"
-    login_date_server   = "N/A"   # date the account joined this server
-    roles_str           = "N/A"
-
+    member_since = login_date_server = roles_str = "N/A"
     if guild:
         try:
-            # Force fetch the member from Discord API (bypass cache)
             member = await guild.fetch_member(user.id)
             if member.joined_at:
                 member_since      = member.joined_at.strftime("%Y-%m-%d")
                 login_date_server = member.joined_at.strftime("%Y-%m-%d %H:%M:%S")
-            # Get roles (skip @everyone)
-            if member.roles:
-                roles_str = ", ".join(r.name for r in member.roles[1:]) or "None"
-        except discord.NotFound:
-            log.warning(f"⚠️ Member {user.id} not found in guild {guild.id}")
-        except Exception as e:
-            log.warning(f"⚠️ Failed to fetch member {user.id}: {e}")
+            roles_str = ", ".join(r.name for r in member.roles[1:]) or "None"
+        except Exception as exc:
+            log.warning(f"⚠️ Could not fetch member {user.id}: {exc}")
 
-    channel_name = (
-        interaction.channel.name
-        if interaction.channel and hasattr(interaction.channel, "name")
-        else "N/A"
-    )
-
+    channel_name   = getattr(interaction.channel, "name", "N/A")
     txt_files_str  = ", ".join(used_txt_files) if used_txt_files else "N/A"
-    lang_label     = {"ar": "Arabic 🇸🇦", "en": "English 🇬🇧"}.get(language, language) if language else "N/A"
-    quality_folder = QUALITY_FOLDER_MAP.get(quality, "N/A") if quality else "N/A"
-    quality_label  = {
-        "hd":  "HD 720p 📺",
-        "fhd": "Full HD 1080p 🎬",
-        "uhd": "Ultra HD 4K 💎",
-    }.get(quality, "N/A") if quality else "N/A"
+    lang_label     = {"ar": "Arabic 🇸🇦", "en": "English 🇬🇧"}.get(language or "", language or "N/A")
+    quality_folder = QUALITY_FOLDER_MAP.get(quality or "", "N/A")
+    quality_label  = {"hd": "HD 720p 📺", "fhd": "Full HD 1080p 🎬", "uhd": "Ultra HD 4K 💎"}.get(quality or "", "N/A")
 
     line = (
         f"[{now_egypt} EGY] "
-        f"👤 User: {username} (Display: {display_name}) | "
-        f"🆔 ID: {user_id} | "
-        f"🗓️  Account Created: {account_since} | "
+        f"👤 User: {user} (Display: {user.display_name}) | "
+        f"🆔 ID: {user.id} | "
+        f"🗓️  Account Created: {user.created_at.strftime('%Y-%m-%d')} | "
         f"📅 Joined Server: {login_date_server} | "
-        f"🏠 Server: {server_name} (ID: {server_id}) | "
+        f"🏠 Server: {guild.name if guild else 'DM'} (ID: {guild.id if guild else 'N/A'}) | "
         f"💬 Channel: #{channel_name} | "
         f"🎭 Roles: [{roles_str}] | "
         f"🌐 Language: {lang_label} | "
@@ -1040,21 +678,15 @@ async def log_user_activity(
         f"🔎 Result: {result}\n"
     )
 
-    # 1. Write locally
     try:
         with open(USER_LOG_FILE, "a", encoding="utf-8") as f:
             f.write(line)
-        log.info(f"📝 Logged activity for {username} locally.")
-    except Exception as e:
-        log.error(f"❌ Failed to write local log: {e}")
+    except Exception as exc:
+        log.error(f"❌ Failed to write local log: {exc}")
 
-    # 2. Push to GitHub asynchronously (non-blocking)
     await asyncio.to_thread(update_users_txt_on_github, line)
 
 
-# ╔══════════════════════════════════════════════════════════════╗
-# ║                       TRANSLATIONS                          ║
-# ╚══════════════════════════════════════════════════════════════╝
 TRANSLATIONS: dict[str, dict[str, str]] = {
     "en": {
         "lang_prompt":            "🌐 **Please select your language:**\n🌐 **الرجاء اختيار اللغة:**",
@@ -1062,24 +694,24 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "confirm_prompt":         "🎬 **Please choose the streaming quality**\n",
         "progress":               "⏳ **Generating your Netflix link… please wait.**",
         "no_cookies_folder":      "❌ Cookies folder not found. Please contact the administrator.",
-        "no_cookie_files":        "❌ No accounts available in the database right now. Please try again later.",
-        "timeout":                "⌛ The validation process took too long. Please try again later.",
+        "no_cookie_files":        "❌ No accounts available right now. Please try again later.",
+        "timeout":                "⌛ Validation took too long. Please try again later.",
         "unexpected_error":       "⚠️ An unexpected error occurred. Please try again.",
         "cookie_invalid":         "❌ The selected session is invalid or expired. Please try again.",
         "success_title":          "✅ 🎬 Netflix Login Link Ready!",
         "success_desc":           "🔗 Click the link below to log in automatically:\n\n{link}",
         "footer":                 "⚠️ This link is for personal use only – do not share it.",
-        "tv_instruction":         " **TV Activation:** Visit **netflix.com/tv9** and enter the code shown on your screen.",
+        "tv_instruction":         "📺 **TV Activation:** Visit **netflix.com/tv9** and enter the code shown on your screen.",
         "hd_label":               "HD 720p",
         "fhd_label":              "Full HD 1080p",
         "uhd_label":              "Ultra HD 4K",
-        "no_label":               "❌  No, cancel",
         "cancelled":              "🚫 Process cancelled.",
         "not_for_you":            "🚫 You cannot interact with this menu.",
         "timeout_msg":            "⏰ Request timed out due to inactivity.",
         "wrong_channel_no_config": "⚠️ No channel configured. Admins must run `/channel` first.",
         "wrong_channel_with_config": "❌ This command can only be used in {channel}.",
-        "wrong_guild":            "❌ This bot is restricted to a specific server.",
+        "wrong_guild":            "❌ This bot is not available in this server.",
+        "not_admin":              "❌ You do not have permission to use this command.",
         "setup_desc": (
             "Welcome! 👋 Use the `/create` command to generate a Netflix PC login link.\n\n"
             "**📋 How to use:**\n"
@@ -1088,7 +720,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
             "3️⃣  Choose your streaming quality: **HD 720p**, **Full HD 1080p**, or **Ultra HD 4K**.\n"
             "4️⃣  Wait a few seconds for your personal link.\n"
             "5️⃣  To log in on TV, visit **netflix.com/tv9** and enter the code shown on your screen.\n"
-            "⚠️ To know how to use the bot on PC, phone, and link the account to the TV, you can watch this video. 👇\n\n"
+            "⚠️ Watch the tutorial video to learn how to use the bot on PC, phone, and TV 👇\n\n"
             "👉  https://www.youtube.com/watch?v=25nqd_0gAfc 👈\n\n"
             "*⚠️ Note: Links are single-use. Messages auto-delete after 1 minute for privacy.*"
         ),
@@ -1097,25 +729,26 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "lang_prompt":            "🌐 **Please select your language:**\n🌐 **الرجاء اختيار اللغة:**",
         "lang_selected":          "\u200f✅ تم اختيار اللغة: **العربية**",
         "confirm_prompt":         "\u200f🎬 **يرجى اختيار جودة العرض**\n",
-        "hd_label":               "HD 720p",
-        "fhd_label":              "Full HD 1080p",
-        "uhd_label":              "Ultra HD 4K",
         "progress":               "\u200f⏳ **جاري إنشاء الرابط الخاص بك… يرجى الانتظار.**",
         "no_cookies_folder":      "\u200f❌ مجلد ملفات تعريف الارتباط غير موجود. يرجى الاتصال بالمسؤول.",
-        "no_cookie_files":        "\u200f❌ لا توجد حسابات متاحة حالياً في قاعدة البيانات. حاول لاحقاً.",
-        "timeout":                "\u200f⌛ استغرق التحقق وقتاً طويلاً. يرجى المحاولة مرة أخرى لاحقاً.",
-        "unexpected_error":       "\u200f⚠️ حدث خطأ غير متوقع أثناء معالجة الطلب.",
+        "no_cookie_files":        "\u200f❌ لا توجد حسابات متاحة حالياً. حاول لاحقاً.",
+        "timeout":                "\u200f⌛ استغرق التحقق وقتاً طويلاً. يرجى المحاولة مرة أخرى.",
+        "unexpected_error":       "\u200f⚠️ حدث خطأ غير متوقع.",
         "cookie_invalid":         "\u200f❌ الحساب المختار غير صالح أو منتهي الصلاحية. حاول مجدداً.",
         "success_title":          "\u200f✅ 🎬 رابط تسجيل الدخول إلى نتفليكس جاهز!",
         "success_desc":           "\u200f🔗 انقر على الرابط أدناه لتسجيل الدخول تلقائياً:\n\n{link}",
         "footer":                 "\u200f⚠️ هذا الرابط للاستخدام الشخصي فقط – يُمنع مشاركته.",
-        "tv_instruction":         "\u200f **تفعيل التلفاز:** قم بزيارة **netflix.com/tv9** وأدخل الرمز المعروض على شاشتك.",
+        "tv_instruction":         "\u200f📺 **تفعيل التلفاز:** قم بزيارة **netflix.com/tv9** وأدخل الرمز المعروض على شاشتك.",
+        "hd_label":               "HD 720p",
+        "fhd_label":              "Full HD 1080p",
+        "uhd_label":              "Ultra HD 4K",
         "cancelled":              "\u200f🚫 تم إلغاء العملية.",
         "not_for_you":            "\u200f🚫 لا يمكنك التفاعل مع هذه القائمة.",
         "timeout_msg":            "\u200f⏰ انتهت مهلة الطلب بسبب عدم التفاعل.",
-        "wrong_channel_no_config": "\u200f⚠️ لم يتم إعداد القناة. يجب على المسؤول استخدام أمر `/channel` أولاً.",
+        "wrong_channel_no_config": "\u200f⚠️ لم يتم إعداد القناة. يجب على المسؤول استخدام `/channel` أولاً.",
         "wrong_channel_with_config": "\u200f❌ لا يمكن استخدام هذا الأمر إلا في {channel}.",
-        "wrong_guild":            "\u200f❌ هذا البوت مخصص للعمل في سيرفر محدد فقط.",
+        "wrong_guild":            "\u200f❌ هذا البوت غير متاح في هذا السيرفر.",
+        "not_admin":              "\u200f❌ ليس لديك صلاحية استخدام هذا الأمر.",
         "setup_desc": (
             "مرحباً! 👋 استخدم أمر `/create` لإنشاء رابط تسجيل دخول لـ نتفليكس.\n\n"
             "**📋 طريقة الاستخدام:**\n"
@@ -1123,151 +756,276 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
             "2️⃣  اختر لغتك المفضلة.\n"
             "3️⃣  اختر جودة العرض: **HD 720p** أو **Full HD 1080p** أو **Ultra HD 4K**.\n"
             "4️⃣  انتظر بضع ثوانٍ للحصول على رابطك الشخصي.\n"
-            "\u200f5️⃣  لتسجيل الدخول على التلفاز، قم بزيارة **netflix.com/tv9** وأدخل الرمز المعروض على شاشتك.\n"
-            "⚠️ لمعرفة كيفية استخدام البوت على الكمبيوتر والهاتف وربط الحساب بالتلفاز، يمكنك مشاهدة هذا الفيديو. 👇\n\n"
+            "\u200f5️⃣  لتسجيل الدخول على التلفاز، قم بزيارة **netflix.com/tv9** وأدخل الرمز المعروض.\n"
+            "⚠️ شاهد الفيديو التعليمي لمعرفة كيفية الاستخدام على الكمبيوتر والهاتف والتلفاز 👇\n\n"
             "👉  https://www.youtube.com/watch?v=25nqd_0gAfc 👈\n\n"
-            "\u200f*⚠️ ملاحظة: الروابط للاستخدام مرة واحدة. يتم حذف الرسائل تلقائياً بعد دقيقة للخصوصية.*"
+            "\u200f*⚠️ ملاحظة: الروابط للاستخدام مرة واحدة. يتم حذف الرسائل تلقائياً بعد دقيقة.*"
         ),
     },
 }
 
 
 def get_user_lang(interaction: discord.Interaction) -> str:
-    """Detect Arabic locale, otherwise default to English."""
     return "ar" if str(interaction.locale).startswith("ar") else "en"
 
 
-# ╔══════════════════════════════════════════════════════════════╗
-# ║                      CONFIG MANAGER                         ║
-# ║  FIXED: PostgreSQL-backed persistence (survives Railway      ║
-# ║  restarts) + DEFAULT_CHANNEL_ID env fallback                ║
-# ╚══════════════════════════════════════════════════════════════╝
+_setup_message_ids: dict[int, dict[str, int]] = {}
+_SETUP_TRACKER_FILE = Path("setup_messages.json")
+
+
+def _load_setup_tracker() -> None:
+    global _setup_message_ids
+    if _SETUP_TRACKER_FILE.exists():
+        try:
+            with open(_SETUP_TRACKER_FILE) as f:
+                raw = json.load(f)
+            _setup_message_ids = {int(k): v for k, v in raw.items()}
+        except Exception as exc:
+            log.warning(f"⚠️ Could not load setup tracker: {exc}")
+
+
+def _save_setup_tracker() -> None:
+    try:
+        with open(_SETUP_TRACKER_FILE, "w") as f:
+            json.dump({str(k): v for k, v in _setup_message_ids.items()}, f, indent=2)
+    except Exception as exc:
+        log.warning(f"⚠️ Could not save setup tracker: {exc}")
+
+
+NETFLIX_RED = discord.Color.from_rgb(229, 9, 20)
+FOOTER_TEXT = "⚡ X2 Salah Utility  •  Netflix Bot 🎬"
+NETFLIX_LOGO = "https://upload.wikimedia.org/wikipedia/commons/0/08/Netflix_2015_logo.svg"
+
+
+def _build_welcome_embed() -> discord.Embed:
+    embed = discord.Embed(
+        title="🎬 Netflix Link Generator  |  مولد روابط نتفليكس",
+        color=NETFLIX_RED,
+        timestamp=datetime.now(EGYPT_TZ),
+    )
+    embed.set_thumbnail(url=NETFLIX_LOGO)
+
+    embed.add_field(
+        name="🇬🇧 Welcome | مرحباً 🇸🇦",
+        value=(
+            "Welcome to the **Netflix Link Generator**! 👋\n"
+            "This bot generates a personal Netflix login link on demand.\n\n"
+            "مرحباً بك في **مولد روابط نتفليكس**! 👋\n"
+            "يقوم هذا البوت بإنشاء رابط تسجيل دخول شخصي لنتفليكس عند الطلب."
+        ),
+        inline=False,
+    )
+
+    embed.add_field(
+        name="📋 How to use | طريقة الاستخدام",
+        value=(
+            "**🇬🇧 English Steps:**\n"
+            "1️⃣  Type `/create` in this channel\n"
+            "2️⃣  Select your language\n"
+            "3️⃣  Choose streaming quality (**HD**, **FHD**, or **4K**)\n"
+            "4️⃣  Receive your personal login link\n"
+            "5️⃣  For TV: visit **netflix.com/tv9** and enter the on-screen code\n\n"
+            "**🇸🇦 الخطوات بالعربي:**\n"
+            "1️⃣  اكتب `/create` في هذه القناة\n"
+            "2️⃣  اختر لغتك\n"
+            "3️⃣  اختر جودة العرض (**HD** أو **FHD** أو **4K**)\n"
+            "4️⃣  احصل على رابط تسجيل الدخول الشخصي\n"
+            "5️⃣  للتلفاز: قم بزيارة **netflix.com/tv9** وأدخل الرمز الظاهر"
+        ),
+        inline=False,
+    )
+
+    embed.add_field(
+        name="🛠️ Available Commands | الأوامر المتاحة",
+        value=(
+            "`/create` – Generate a Netflix login link | إنشاء رابط نتفليكس\n"
+            "`/ban` – Block a user (Admin) | حظر مستخدم (مسؤول)\n"
+            "`/unban` – Unblock a user (Admin) | رفع الحظر (مسؤول)\n"
+            "`/channel` – Set bot channel (Admin) | تعيين قناة البوت (مسؤول)\n"
+            "`/admin` – Manage bot admins (Admin) | إدارة المشرفين (مسؤول)"
+        ),
+        inline=False,
+    )
+
+    embed.add_field(
+        name="📺 Tutorial Video | فيديو تعليمي",
+        value="👉 https://www.youtube.com/watch?v=25nqd_0gAfc 👈",
+        inline=False,
+    )
+
+    embed.set_footer(text=FOOTER_TEXT)
+    return embed
+
+
+def _build_rules_embed() -> discord.Embed:
+    embed = discord.Embed(
+        title="📜 Rules & Guidelines  |  القواعد والإرشادات",
+        color=discord.Color.from_rgb(230, 126, 34),
+        timestamp=datetime.now(EGYPT_TZ),
+    )
+
+    embed.add_field(
+        name="🇬🇧 Rules (English)",
+        value=(
+            "⚠️ **Rule 1:** Do not create more than one account within 24 hours (one day).\n\n"
+            "🚫 **Rule 2:** Any suspicious use of the bot will result in the user being "
+            "permanently banned from using the bot.\n\n"
+            "✅ **Rule 3:** Links are for personal use only – do **not** share them with others.\n\n"
+            "🔄 **Rule 4:** Messages auto-delete after **1 minute** for privacy."
+        ),
+        inline=False,
+    )
+
+    embed.add_field(
+        name="🇸🇦 القواعد (العربية)",
+        value=(
+            "⚠️ **القاعدة 1:** يُمنع إنشاء أكثر من حساب خلال 24 ساعة (يوم واحد).\n\n"
+            "🚫 **القاعدة 2:** أي استخدام مشبوه للبوت سيؤدي إلى حظر المستخدم نهائياً من استخدام البوت.\n\n"
+            "✅ **القاعدة 3:** الروابط للاستخدام الشخصي فقط – يُمنع مشاركتها مع الآخرين.\n\n"
+            "🔄 **القاعدة 4:** يتم حذف الرسائل تلقائياً بعد **دقيقة واحدة** لحماية الخصوصية."
+        ),
+        inline=False,
+    )
+
+    embed.set_footer(text=FOOTER_TEXT)
+    return embed
+
+
+async def send_or_update_setup_messages(channel: discord.TextChannel, guild_id: int) -> None:
+    stored = _setup_message_ids.get(guild_id, {})
+    welcome_embed = _build_welcome_embed()
+    rules_embed   = _build_rules_embed()
+
+    welcome_msg_id = stored.get("welcome")
+    welcome_msg: discord.Message | None = None
+
+    if welcome_msg_id:
+        try:
+            welcome_msg = await channel.fetch_message(welcome_msg_id)
+            await welcome_msg.edit(embed=welcome_embed)
+            log.info(f"✏️ Updated existing welcome message {welcome_msg_id}")
+        except discord.NotFound:
+            welcome_msg = None
+        except Exception as exc:
+            log.warning(f"⚠️ Could not update welcome message: {exc}")
+            welcome_msg = None
+
+    if welcome_msg is None:
+        try:
+            welcome_msg = await channel.send(embed=welcome_embed)
+            await welcome_msg.pin()
+            log.info(f"📌 Pinned welcome message {welcome_msg.id} in #{channel.name}")
+        except discord.Forbidden:
+            log.warning(f"⚠️ No permission to send/pin in #{channel.name}")
+            return
+        except Exception as exc:
+            log.error(f"❌ Failed to send welcome message: {exc}")
+            return
+
+    rules_msg_id = stored.get("rules")
+    rules_msg: discord.Message | None = None
+
+    if rules_msg_id:
+        try:
+            rules_msg = await channel.fetch_message(rules_msg_id)
+            await rules_msg.edit(embed=rules_embed)
+            log.info(f"✏️ Updated existing rules message {rules_msg_id}")
+        except discord.NotFound:
+            rules_msg = None
+        except Exception as exc:
+            log.warning(f"⚠️ Could not update rules message: {exc}")
+            rules_msg = None
+
+    if rules_msg is None:
+        try:
+            rules_msg = await channel.send(embed=rules_embed)
+            await rules_msg.pin()
+            log.info(f"📌 Pinned rules message {rules_msg.id} in #{channel.name}")
+        except Exception as exc:
+            log.error(f"❌ Failed to send rules message: {exc}")
+
+    _setup_message_ids[guild_id] = {
+        "welcome": welcome_msg.id if welcome_msg else None,
+        "rules":   rules_msg.id   if rules_msg   else None,
+    }
+    _save_setup_tracker()
+
+
 class Config:
     def __init__(self) -> None:
-        # In-memory cache: str(guild_id) → channel_id
-        self.guilds: dict[str, int] = {}
-        # Legacy single-channel attr kept for compatibility
-        self.allowed_channel_id: int | None = None
-        # PostgreSQL connection pool (set during bot startup)
+        self.guilds:             dict[str, int] = {}
+        self.allowed_channel_id: int | None     = None
         self._db_pool = None
 
-    # ── PostgreSQL helpers ─────────────────────────────────────────
-
     async def init_db(self) -> None:
-        """
-        Called once in on_ready().
-        Creates the guild_config table if it doesn't exist,
-        then loads all rows into the in-memory cache.
-        Fallback chain:
-          1. PostgreSQL  (Railway DATABASE_URL)
-          2. config.json (local file)
-          3. GitHub logs.txt (CHANNEL_LOG_URL – survives bot updates)
-          4. DEFAULT_CHANNEL_ID env var
-        """
-        if not DATABASE_URL or not HAS_ASYNCPG:
-            log.warning("⚠️ PostgreSQL unavailable – using file/env/GitHub fallback")
-            self._load_from_file()
-        else:
+        if DATABASE_URL and HAS_ASYNCPG:
             try:
-                # Railway's DATABASE_URL starts with postgres:// but asyncpg needs postgresql://
-                dsn = DATABASE_URL.replace("postgres://", "postgresql://", 1)
-                self._db_pool = await asyncpg.create_pool(dsn, min_size=1, max_size=3)
-
+                dsn            = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+                self._db_pool  = await asyncpg.create_pool(dsn, min_size=1, max_size=3)
                 async with self._db_pool.acquire() as conn:
                     await conn.execute("""
                         CREATE TABLE IF NOT EXISTS guild_config (
-                            guild_id  TEXT PRIMARY KEY,
+                            guild_id   TEXT  PRIMARY KEY,
                             channel_id BIGINT NOT NULL
                         )
                     """)
                     rows = await conn.fetch("SELECT guild_id, channel_id FROM guild_config")
                     for row in rows:
                         self.guilds[row["guild_id"]] = int(row["channel_id"])
-
-                log.info(f"✅ PostgreSQL config loaded – {len(self.guilds)} guild(s): {self.guilds}")
-            except Exception as e:
-                log.error(f"❌ PostgreSQL init failed: {e} – falling back to file/GitHub")
+                log.info(f"✅ PostgreSQL loaded – {len(self.guilds)} guild(s)")
+            except Exception as exc:
+                log.error(f"❌ PostgreSQL init failed: {exc} – using file fallback")
                 self._db_pool = None
                 self._load_from_file()
+        else:
+            log.warning("⚠️ PostgreSQL unavailable – using file/env/GitHub fallback")
+            self._load_from_file()
 
-        # ── GitHub logs.txt fallback ───────────────────────────────────
-        # Fill in any guilds still missing from the in-memory cache.
-        # This is the key layer that survives bot updates even when
-        # PostgreSQL and config.json are both unavailable.
-        import asyncio as _asyncio
-        loop = _asyncio.get_event_loop()
+        loop         = asyncio.get_event_loop()
         github_links = await loop.run_in_executor(None, load_channel_links_from_github)
-        restored = 0
         for gid, cid in github_links.items():
             if gid not in self.guilds:
                 self.guilds[gid] = cid
-                restored += 1
                 log.info(f"🔄 Restored from GitHub logs.txt: guild {gid} → channel {cid}")
-        if restored:
-            log.info(f"✅ {restored} guild channel link(s) restored from GitHub logs.txt")
 
     async def _save_to_db(self, guild_id: str, channel_id: int) -> None:
-        """NEW: Upsert a guild→channel mapping into PostgreSQL."""
         if not self._db_pool:
             return
         try:
             async with self._db_pool.acquire() as conn:
                 await conn.execute("""
-                    INSERT INTO guild_config (guild_id, channel_id)
-                    VALUES ($1, $2)
+                    INSERT INTO guild_config (guild_id, channel_id) VALUES ($1, $2)
                     ON CONFLICT (guild_id) DO UPDATE SET channel_id = EXCLUDED.channel_id
                 """, guild_id, channel_id)
-            log.info(f"✅ Saved to PostgreSQL: guild {guild_id} → channel {channel_id}")
-        except Exception as e:
-            log.error(f"❌ PostgreSQL save failed: {e}")
-
-    # ── File fallback (used when no DB available) ──────────────────
+        except Exception as exc:
+            log.error(f"❌ PostgreSQL save failed: {exc}")
 
     def _load_from_file(self) -> None:
-        """
-        FIXED: Load from config.json as a fallback.
-        Handles both new per-guild and old flat formats.
-        Does NOT crash if file is missing (Railway ephemeral storage).
-        """
         if not CONFIG_FILE.exists():
-            log.warning("⚠️ config.json not found – only DEFAULT_CHANNEL_ID env will be used")
             return
         try:
-            with open(CONFIG_FILE, "r") as f:
+            with open(CONFIG_FILE) as f:
                 data = json.load(f)
-            if "guilds" in data and isinstance(data["guilds"], dict):
+            if isinstance(data.get("guilds"), dict):
                 self.guilds = {str(k): int(v) for k, v in data["guilds"].items()}
-                log.info(f"✅ config.json loaded – guilds: {self.guilds}")
-            elif "allowed_channel_id" in data and data["allowed_channel_id"]:
+            elif data.get("allowed_channel_id"):
                 self.allowed_channel_id = int(data["allowed_channel_id"])
-                log.warning("⚠️ Old config.json format – using legacy allowed_channel_id")
-        except Exception as e:
-            log.error(f"❌ Failed to read config.json: {e}")
+        except Exception as exc:
+            log.error(f"❌ Failed to read config.json: {exc}")
 
     def _save_to_file(self) -> None:
-        """Save current guilds dict to config.json (best-effort on Railway)."""
         try:
             with open(CONFIG_FILE, "w") as f:
                 json.dump({"guilds": self.guilds}, f, indent=2)
-        except Exception as e:
-            log.warning(f"⚠️ Could not save config.json (ephemeral storage?): {e}")
-
-    # ── Public API ─────────────────────────────────────────────────
+        except Exception as exc:
+            log.warning(f"⚠️ Could not save config.json: {exc}")
 
     def get_channel_for_guild(self, guild_id: int) -> int | None:
-        """
-        Return the configured channel for the given guild.
-        Priority:
-          1) In-memory cache (loaded from PostgreSQL or file at startup)
-          2) Legacy flat allowed_channel_id (migration)
-          3) DEFAULT_CHANNEL_ID environment variable (always reliable on Railway)
-        """
         guild_key = str(guild_id)
         if guild_key in self.guilds:
             return self.guilds[guild_key]
         if self.allowed_channel_id:
             return self.allowed_channel_id
-        # NEW: env-based fallback — always works even after Railway restart
         return DEFAULT_CHANNEL_ID
 
     async def set_allowed_channel(
@@ -1277,44 +1035,27 @@ class Config:
         guild_name: str = "Unknown",
         channel_name: str = "Unknown",
     ) -> None:
-        """
-        FIXED: Now async — saves to PostgreSQL first (persistent),
-        then file (best-effort), then updates in-memory cache.
-        Also writes to GitHub logs.txt so the mapping survives bot updates.
-        """
-        guild_key = str(guild_id)
+        guild_key             = str(guild_id)
         self.guilds[guild_key] = channel_id
-        self.allowed_channel_id = channel_id  # legacy compat
-
-        # 1. Save to PostgreSQL (survives Railway restarts)
+        self.allowed_channel_id = channel_id
         await self._save_to_db(guild_key, channel_id)
-
-        # 2. Save to file (best-effort, may not survive restart on Railway)
         self._save_to_file()
-
-        # 3. Save to GitHub logs.txt (survives bot updates – the new fallback layer)
-        import asyncio as _asyncio
-        loop = _asyncio.get_event_loop()
+        loop = asyncio.get_event_loop()
         await loop.run_in_executor(
-            None,
-            save_channel_link_to_github,
+            None, save_channel_link_to_github,
             guild_id, guild_name, channel_id, channel_name,
         )
-
         log.info(f"✅ Channel set: guild {guild_id} → channel {channel_id}")
 
 
 config = Config()
 
-# ╔══════════════════════════════════════════════════════════════╗
-# ║                        BOT SETUP                            ║
-# ╚══════════════════════════════════════════════════════════════╝
+
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 
-# UPDATED: per-guild channel check with DEFAULT_CHANNEL_ID fallback
 def is_allowed_channel(interaction: discord.Interaction) -> bool:
     guild_id = interaction.guild.id if interaction.guild else None
     if guild_id is None:
@@ -1325,46 +1066,44 @@ def is_allowed_channel(interaction: discord.Interaction) -> bool:
     return interaction.channel_id == channel_id
 
 
-# ╔══════════════════════════════════════════════════════════════╗
-# ║              GLOBAL INTERACTION CHECK (guild guard)         ║
-# ║  UPDATED: checks against ALLOWED_GUILD_IDS list             ║
-# ╚══════════════════════════════════════════════════════════════╝
+def _guild_allowed(guild_id: int | None) -> bool:
+    if not guild_id:
+        return False
+    if not ALLOWED_GUILD_IDS:
+        return True
+    return guild_id in ALLOWED_GUILD_IDS
+
+
 async def global_interaction_check(interaction: discord.Interaction) -> bool:
-    # ── Ban check (fast in-memory lookup) ─────────────────────────────
     if is_user_banned(interaction.user.id):
         attempts = record_ban_attempt(interaction.user.id)
-        lang = get_user_lang(interaction)
+        lang     = get_user_lang(interaction)
         msg = (
             f"🚫 You have been banned from using this bot. (Attempt #{attempts})"
             if lang == "en"
             else f"\u200f🚫 تم حظرك من استخدام هذا البوت. (المحاولة رقم #{attempts})"
         )
-        log.warning(
-            f"🚫 Banned user {interaction.user} (ID: {interaction.user.id}) "
-            f"attempted to use /{interaction.command.name if interaction.command else '?'} "
-            f"– attempt #{attempts}"
-        )
+        cmd_name = interaction.command.name if interaction.command else "?"
+        log.warning(f"🚫 Banned user {interaction.user} tried /{cmd_name} – attempt #{attempts}")
         if interaction.response.is_done():
             await interaction.followup.send(msg, ephemeral=True)
         else:
             await interaction.response.send_message(msg, ephemeral=True)
         return False
 
-    # UPDATED: multi-guild check
-    if interaction.guild is None or interaction.guild.id not in ALLOWED_GUILD_IDS:
+    guild_id = interaction.guild.id if interaction.guild else None
+    if not _guild_allowed(guild_id):
         lang = get_user_lang(interaction)
-        msg = TRANSLATIONS[lang]["wrong_guild"]
+        msg  = TRANSLATIONS[lang]["wrong_guild"]
         if interaction.response.is_done():
             await interaction.followup.send(msg, ephemeral=True)
         else:
             await interaction.response.send_message(msg, ephemeral=True)
         return False
+
     return True
 
 
-# ╔══════════════════════════════════════════════════════════════╗
-# ║               LANGUAGE SELECTION VIEW                       ║
-# ╚══════════════════════════════════════════════════════════════╝
 class LanguageSelectView(discord.ui.View):
     def __init__(self, original_interaction: discord.Interaction) -> None:
         super().__init__(timeout=60)
@@ -1380,23 +1119,18 @@ class LanguageSelectView(discord.ui.View):
 
     async def _set_language(self, interaction: discord.Interaction, lang: str) -> None:
         if interaction.user.id != self.original_interaction.user.id:
-            user_lang = get_user_lang(interaction)
-            await interaction.response.send_message(TRANSLATIONS[user_lang]["not_for_you"], ephemeral=True)
+            await interaction.response.send_message(
+                TRANSLATIONS[get_user_lang(interaction)]["not_for_you"], ephemeral=True
+            )
             return
-
         for child in self.children:
             child.disabled = True
         await interaction.response.edit_message(content=TRANSLATIONS[lang]["lang_selected"], view=self)
-
-        # Capture the lang-selection message so it can be deleted later
-        lang_message = await interaction.original_response()
-
-        confirm_view = ConfirmView(self.original_interaction.user, self.original_interaction, lang)
+        lang_message  = await interaction.original_response()
+        confirm_view  = ConfirmView(self.original_interaction.user, self.original_interaction, lang)
         confirm_message = await interaction.followup.send(
             TRANSLATIONS[lang]["confirm_prompt"], view=confirm_view, ephemeral=True
         )
-
-        # Pass references into ConfirmView so generate_link can clean them up
         confirm_view.lang_message    = lang_message
         confirm_view.confirm_message = confirm_message
         self.stop()
@@ -1405,165 +1139,121 @@ class LanguageSelectView(discord.ui.View):
         for child in self.children:
             child.disabled = True
         try:
-            await self.original_interaction.edit_original_response(content=TRANSLATIONS["en"]["timeout_msg"], view=None)
+            await self.original_interaction.edit_original_response(
+                content=TRANSLATIONS["en"]["timeout_msg"], view=None
+            )
         except Exception:
             pass
 
 
-# ╔══════════════════════════════════════════════════════════════╗
-# ║            QUALITY SELECTION VIEW (HD / FHD / UHD)          ║
-# ║  Replaces old Yes/No confirm – user picks streaming quality  ║
-# ║  HD 720p  → /Basic   subfolder                              ║
-# ║  FHD 1080p → /Standard subfolder                            ║
-# ║  UHD 4K   → /Premium  subfolder                             ║
-# ╚══════════════════════════════════════════════════════════════╝
-
-# Maps quality choice → GitHub subfolder name and local subfolder name
-QUALITY_FOLDER_MAP: dict[str, str] = {
-    "hd":  "Basic",
-    "fhd": "Standard",
-    "uhd": "Premium",
-}
-
-
 class ConfirmView(discord.ui.View):
-    """Quality-selection view. Button labels are always the same (HD / FHD / UHD)
-    regardless of language, as per the spec."""
-
-    def __init__(self, original_user: discord.User | discord.Member, original_interaction: discord.Interaction, language: str) -> None:
+    def __init__(
+        self,
+        original_user: discord.User | discord.Member,
+        original_interaction: discord.Interaction,
+        language: str,
+    ) -> None:
         super().__init__(timeout=60)
         self.original_user        = original_user
         self.original_interaction = original_interaction
         self.language             = language
         self.lang_message:    discord.Message | None = None
         self.confirm_message: discord.Message | None = None
-        self.quality:         str | None = None   # set when a button is pressed
+        self.quality:         str | None             = None
 
-        hd_btn = discord.ui.Button(label=TRANSLATIONS[language]["hd_label"],  style=discord.ButtonStyle.primary, emoji="📺")
-        hd_btn.callback = self._make_quality_callback("hd")
-
-        fhd_btn = discord.ui.Button(label=TRANSLATIONS[language]["fhd_label"], style=discord.ButtonStyle.success, emoji="🎬")
-        fhd_btn.callback = self._make_quality_callback("fhd")
-
-        uhd_btn = discord.ui.Button(label=TRANSLATIONS[language]["uhd_label"], style=discord.ButtonStyle.danger,  emoji="💎")
-        uhd_btn.callback = self._make_quality_callback("uhd")
-
-        self.add_item(hd_btn)
-        self.add_item(fhd_btn)
-        self.add_item(uhd_btn)
+        for key, label, style, emoji in [
+            ("hd",  TRANSLATIONS[language]["hd_label"],  discord.ButtonStyle.primary, "📺"),
+            ("fhd", TRANSLATIONS[language]["fhd_label"], discord.ButtonStyle.success,  "🎬"),
+            ("uhd", TRANSLATIONS[language]["uhd_label"], discord.ButtonStyle.danger,   "💎"),
+        ]:
+            btn          = discord.ui.Button(label=label, style=style, emoji=emoji)
+            btn.callback = self._make_quality_callback(key)
+            self.add_item(btn)
 
     def _make_quality_callback(self, quality_key: str):
         async def callback(interaction: discord.Interaction) -> None:
             if interaction.user.id != self.original_user.id:
-                await interaction.response.send_message(TRANSLATIONS[self.language]["not_for_you"], ephemeral=True)
+                await interaction.response.send_message(
+                    TRANSLATIONS[self.language]["not_for_you"], ephemeral=True
+                )
                 return
             self.quality = quality_key
-            await interaction.response.edit_message(content=TRANSLATIONS[self.language]["progress"], view=None)
+            await interaction.response.edit_message(
+                content=TRANSLATIONS[self.language]["progress"], view=None
+            )
             await self.generate_link(interaction)
             self.stop()
         return callback
 
-    # no_callback kept for timeout / legacy – no button exposes it any more
-    async def no_callback(self, interaction: discord.Interaction) -> None:
-        if interaction.user.id != self.original_user.id:
-            await interaction.response.send_message(TRANSLATIONS[self.language]["not_for_you"], ephemeral=True)
-            return
-        await interaction.response.edit_message(content=TRANSLATIONS[self.language]["cancelled"], view=None)
-        await log_user_activity(interaction, "Cancelled", "User cancelled", language=self.language)
-        self.stop()
-
     async def generate_link(self, interaction: discord.Interaction) -> None:
-        lang = self.language
-        t = TRANSLATIONS[lang]
+        lang           = self.language
+        t              = TRANSLATIONS[lang]
+        quality_key    = self.quality or "fhd"
+        quality_folder = QUALITY_FOLDER_MAP[quality_key]
 
-        # ── Resolve quality subfolder ──────────────────────────────────
-        quality_key    = self.quality or "fhd"          # default to FHD if somehow unset
-        quality_folder = QUALITY_FOLDER_MAP[quality_key] # "Basic" | "Standard" | "Premium"
-        log.info(f"🎬 Quality selected: {quality_key} → folder: {quality_folder}")
-
-        # ── NEW: Try GitHub cookies first (quality subfolder), fall back to local ──
         chosen_file_name: str | None = None
         cookie_content:   str | None = None
-        tmp_path:         str | None = None   # temp file path passed to checker
+        tmp_path:         str | None = None
 
         if COOKIES_GITHUB_REPO and COOKIES_GITHUB_PATH is not None:
-            # Build the quality-specific subfolder path inside the GitHub cookies tree
-            base_path   = (COOKIES_GITHUB_PATH.rstrip("/") + "/" + quality_folder) if COOKIES_GITHUB_PATH else quality_folder
-            github_names = await asyncio.to_thread(
-                _fetch_github_cookie_list_in_path, base_path
-            )
-
-            if not github_names:
-                log.warning(f"⚠️ No .txt files in GitHub/{base_path} – trying local fallback")
-            else:
-                chosen_file_name = await asyncio.to_thread(
-                    pick_github_cookie_rotation, github_names
-                )
-                cookie_content = await asyncio.to_thread(
+            base_path    = (COOKIES_GITHUB_PATH.rstrip("/") + "/" + quality_folder) if COOKIES_GITHUB_PATH else quality_folder
+            github_names = await asyncio.to_thread(_fetch_github_cookie_list_in_path, base_path)
+            if github_names:
+                chosen_file_name = await asyncio.to_thread(pick_github_cookie_rotation, github_names)
+                cookie_content   = await asyncio.to_thread(
                     _fetch_github_cookie_content_in_path, base_path, chosen_file_name
                 )
                 if cookie_content is None:
-                    log.warning(f"⚠️ Could not download {chosen_file_name} – trying local fallback")
                     chosen_file_name = None
 
-        # ── LOCAL FALLBACK: use local cookies/<quality_folder>/ ────────
         if cookie_content is None:
-            local_quality_folder = COOKIES_FOLDER / quality_folder
-            if not local_quality_folder.exists():
-                # gracefully fall back to root cookies folder
-                local_quality_folder = COOKIES_FOLDER
-            if not local_quality_folder.exists():
+            local_dir = COOKIES_FOLDER / quality_folder
+            if not local_dir.exists():
+                local_dir = COOKIES_FOLDER
+            if not local_dir.exists():
                 await interaction.edit_original_response(content=t["no_cookies_folder"])
-                await log_user_activity(interaction, "Error", "Cookies folder missing", language=self.language)
+                await log_user_activity(interaction, "Error", "Cookies folder missing", language=lang)
                 return
-
-            txt_files = list(local_quality_folder.glob("*.txt"))
+            txt_files = list(local_dir.glob("*.txt"))
             if not txt_files:
                 await interaction.edit_original_response(content=t["no_cookie_files"])
-                await log_user_activity(interaction, "Error", "No cookie files found", language=self.language)
+                await log_user_activity(interaction, "Error", "No cookie files", language=lang)
                 return
-
             chosen_path      = pick_cookie_file(txt_files)
             chosen_file_name = chosen_path.name
-            log.info(f"📂 Using local cookie file: {chosen_file_name} from {local_quality_folder}")
-
             try:
                 cookie_content = chosen_path.read_text(encoding="utf-8")
-            except Exception as e:
-                log.error(f"❌ Failed to read local cookie file: {e}")
+            except Exception as exc:
+                log.error(f"❌ Failed to read local cookie: {exc}")
                 await interaction.edit_original_response(content=t["unexpected_error"])
                 return
 
-        # ── Write content to a temp file so check_cookie_file can read it ─
         try:
-            with tempfile.NamedTemporaryFile(
-                mode="w", suffix=".txt", delete=False, encoding="utf-8"
-            ) as tmp:
+            with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False, encoding="utf-8") as tmp:
                 tmp.write(cookie_content)
                 tmp_path = tmp.name
-        except Exception as e:
-            log.error(f"❌ Failed to write temp cookie file: {e}")
+        except Exception as exc:
+            log.error(f"❌ Failed to write temp cookie file: {exc}")
             await interaction.edit_original_response(content=t["unexpected_error"])
             return
-
-        log.info(f"🎯 {interaction.user} → checking cookie: {chosen_file_name}")
 
         try:
             result = await asyncio.wait_for(
                 asyncio.to_thread(check_cookie_file, tmp_path),
-                timeout=SCRIPT_TIMEOUT
+                timeout=SCRIPT_TIMEOUT,
             )
         except asyncio.TimeoutError:
             await interaction.edit_original_response(content=t["timeout"])
-            await log_user_activity(interaction, "Timeout", "Cookie validation timeout", used_txt_files=[chosen_file_name], language=self.language, quality=self.quality)
+            await log_user_activity(interaction, "Timeout", "Validation timeout",
+                                    used_txt_files=[chosen_file_name], language=lang, quality=quality_key)
             return
-        except Exception as e:
-            log.error(f"❌ Checker error: {e}")
+        except Exception as exc:
+            log.error(f"❌ Checker error: {exc}")
             await interaction.edit_original_response(content=t["unexpected_error"])
-            await log_user_activity(interaction, "Error", f"Exception: {str(e)[:80]}", used_txt_files=[chosen_file_name], language=self.language, quality=self.quality)
+            await log_user_activity(interaction, "Error", f"Exception: {str(exc)[:80]}",
+                                    used_txt_files=[chosen_file_name], language=lang, quality=quality_key)
             return
         finally:
-            # ALWAYS clean up the temp file
             if tmp_path:
                 try:
                     os.unlink(tmp_path)
@@ -1574,25 +1264,25 @@ class ConfirmView(discord.ui.View):
             embed = discord.Embed(
                 title=t["success_title"],
                 description=t["success_desc"].format(link=result),
-                color=discord.Color.from_rgb(229, 9, 20),
+                color=NETFLIX_RED,
                 timestamp=datetime.now(),
             )
-            embed.set_thumbnail(url="https://upload.wikimedia.org/wikipedia/commons/0/08/Netflix_2015_logo.svg")
+            embed.set_thumbnail(url=NETFLIX_LOGO)
             embed.set_footer(text=t["footer"] + "  •  X2 Salah Utility 🎬")
-
             await interaction.edit_original_response(content=None, embed=embed)
             tv_message = await interaction.followup.send(t["tv_instruction"], ephemeral=True)
 
-            # Cleanup logic
-            channel = interaction.channel
+            channel         = interaction.channel
             command_message = None
             try:
                 async for msg in channel.history(limit=10):
-                    if (msg.author == interaction.client.user and msg.interaction_metadata and msg.interaction_metadata.id == interaction.id):
+                    if (msg.author == interaction.client.user
+                            and msg.interaction_metadata
+                            and msg.interaction_metadata.id == interaction.id):
                         command_message = msg
                         break
-            except Exception as e:
-                log.warning(f"⚠️ Could not fetch command message: {e}")
+            except Exception:
+                pass
 
             original_response = await interaction.original_response()
             asyncio.create_task(cleanup_messages(
@@ -1604,25 +1294,24 @@ class ConfirmView(discord.ui.View):
                 confirm_message=self.confirm_message,
                 delay_seconds=CLEANUP_DELAY_SECONDS,
             ))
-
-            log.info(f"🔗 Link sent to {interaction.user} – cleanup in {CLEANUP_DELAY_SECONDS}s")
-            await log_user_activity(interaction, "✅ Success", "Link generated", used_txt_files=[chosen_file_name], language=self.language, quality=self.quality)
+            await log_user_activity(interaction, "✅ Success", "Link generated",
+                                    used_txt_files=[chosen_file_name], language=lang, quality=quality_key)
         else:
             await interaction.edit_original_response(content=t["cookie_invalid"])
-            await log_user_activity(interaction, "❌ Failed", "Cookie invalid or expired", used_txt_files=[chosen_file_name], language=self.language, quality=self.quality)
+            await log_user_activity(interaction, "❌ Failed", "Cookie invalid",
+                                    used_txt_files=[chosen_file_name], language=lang, quality=quality_key)
 
     async def on_timeout(self) -> None:
         for child in self.children:
             child.disabled = True
         try:
-            await self.original_interaction.edit_original_response(content=TRANSLATIONS[self.language]["timeout_msg"], view=None)
+            await self.original_interaction.edit_original_response(
+                content=TRANSLATIONS[self.language]["timeout_msg"], view=None
+            )
         except Exception:
             pass
 
 
-# ╔══════════════════════════════════════════════════════════════╗
-# ║                      CLEANUP TASK                           ║
-# ╚══════════════════════════════════════════════════════════════╝
 async def cleanup_messages(
     channel: discord.TextChannel,
     command_message: discord.Message | None,
@@ -1642,86 +1331,66 @@ async def cleanup_messages(
     log.info("🧹 Cleanup complete.")
 
 
-# ╔══════════════════════════════════════════════════════════════╗
-# ║               /channel COMMAND  (Admin only)                ║
-# ║  UPDATED: stores channel per guild ID                       ║
-# ╚══════════════════════════════════════════════════════════════╝
-@bot.tree.command(name="channel", description="📌 Set the text channel where the bot will work (Admin only)")
-@app_commands.default_permissions(administrator=True)
-async def set_channel(interaction: discord.Interaction, channel: discord.TextChannel) -> None:
-    if not interaction.user.guild_permissions.administrator:
-        lang = get_user_lang(interaction)
-        msg = "❌ You need administrator permissions." if lang == "en" else "❌ تحتاج إلى صلاحيات المسؤول."
-        await interaction.response.send_message(msg, ephemeral=True)
-        return
-
-    # UPDATED: store channel per guild (now async → saves to PostgreSQL + GitHub logs.txt)
-    guild_id = interaction.guild.id
-    guild_name = interaction.guild.name if interaction.guild else "Unknown"
-    await config.set_allowed_channel(guild_id, channel.id, guild_name=guild_name, channel_name=channel.name)
-
-    lang = get_user_lang(interaction)
-    success_msg = f"✅ Bot will now **only** respond in {channel.mention}." if lang == "en" else f"✅ البوت سيعمل الآن **فقط** في {channel.mention}."
-    await interaction.response.send_message(success_msg, ephemeral=True)
-
-    # Bilingual pinned setup embed
-    embed = discord.Embed(
-        title="🎬 Netflix Link Generator  |  مولد روابط نتفليكس",
-        description=f"🇬🇧 **English:**\n{TRANSLATIONS['en']['setup_desc']}\n\n🇸🇦 **العربية:**\n{TRANSLATIONS['ar']['setup_desc']}",
-        color=discord.Color.from_rgb(229, 9, 20),
-        timestamp=datetime.now(),
-    )
-    embed.set_footer(text="⚡ X2 Salah Utility  •  Netflix Bot 🎬")
-    try:
-        setup_msg = await channel.send(embed=embed)
-        await setup_msg.pin()
-        log.info(f"📌 Pinned setup message in #{channel.name} (ID: {channel.id})")
-    except discord.Forbidden:
-        log.warning(f"⚠️ Missing permissions to send/pin in #{channel.name}")
-    except Exception as e:
-        log.error(f"❌ Failed to send setup message: {e}")
-
-
-# ╔══════════════════════════════════════════════════════════════╗
-# ║                /create COMMAND                              ║
-# ║  UPDATED: pre-checks guild + channel before proceeding      ║
-# ╚══════════════════════════════════════════════════════════════╝
 @bot.tree.command(name="create", description="🎬 Generate a Netflix PC login link from a random cookie file")
 async def create(interaction: discord.Interaction) -> None:
     user_lang = get_user_lang(interaction)
 
-    # PRE-CHECK 1: guild must be allowed (NEW)
-    if interaction.guild is None or interaction.guild.id not in ALLOWED_GUILD_IDS:
-        await interaction.response.send_message(TRANSLATIONS[user_lang]["wrong_guild"], ephemeral=True)
-        return
-
-    # PRE-CHECK 2: channel must be configured (UPDATED: uses per-guild lookup)
     if not is_allowed_channel(interaction):
-        guild_id = interaction.guild.id
-        channel_id = config.get_channel_for_guild(guild_id)
+        guild_id   = interaction.guild.id if interaction.guild else None
+        channel_id = config.get_channel_for_guild(guild_id) if guild_id else None
         if channel_id is None:
-            await interaction.response.send_message(TRANSLATIONS[user_lang]["wrong_channel_no_config"], ephemeral=True)
+            await interaction.response.send_message(
+                TRANSLATIONS[user_lang]["wrong_channel_no_config"], ephemeral=True
+            )
         else:
             allowed_channel = bot.get_channel(channel_id)
             mention = allowed_channel.mention if allowed_channel else "the designated channel"
-            await interaction.response.send_message(TRANSLATIONS[user_lang]["wrong_channel_with_config"].format(channel=mention), ephemeral=True)
+            await interaction.response.send_message(
+                TRANSLATIONS[user_lang]["wrong_channel_with_config"].format(channel=mention), ephemeral=True
+            )
         return
 
     view = LanguageSelectView(interaction)
     await interaction.response.send_message(TRANSLATIONS["en"]["lang_prompt"], view=view, ephemeral=True)
 
 
-# ╔══════════════════════════════════════════════════════════════╗
-# ║               /ban COMMAND  (Admin only)                    ║
-# ║  Blocks a user by ID from using the bot.                   ║
-# ╚══════════════════════════════════════════════════════════════╝
-@bot.tree.command(name="ban", description="🚫 Block a user from using the bot by their Discord ID (Admin only)")
-@app_commands.describe(user_id="The Discord user ID to ban (works even if they left the server)")
-@app_commands.default_permissions(administrator=True)
-@app_commands.guilds(*[discord.Object(id=gid) for gid in ALLOWED_GUILD_IDS])
-async def ban_user(interaction: discord.Interaction, user_id: str) -> None:
-    await interaction.response.defer(ephemeral=True)
+@bot.tree.command(
+    name="channel",
+    description="📌 Set the text channel where the bot will work (Admin only)",
+)
+@app_commands.describe(channel="The text channel to designate as the bot's working channel")
+async def set_channel(interaction: discord.Interaction, channel: discord.TextChannel) -> None:
+    lang = get_user_lang(interaction)
 
+    if not is_admin(interaction.user.id) and not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message(TRANSLATIONS[lang]["not_admin"], ephemeral=True)
+        return
+
+    guild_id   = interaction.guild.id
+    guild_name = interaction.guild.name if interaction.guild else "Unknown"
+    await config.set_allowed_channel(guild_id, channel.id, guild_name=guild_name, channel_name=channel.name)
+
+    msg = (
+        f"✅ Bot will now **only** respond in {channel.mention}."
+        if lang == "en"
+        else f"\u200f✅ البوت سيعمل الآن **فقط** في {channel.mention}."
+    )
+    await interaction.response.send_message(msg, ephemeral=True)
+
+    await send_or_update_setup_messages(channel, guild_id)
+
+    log.info(f"📌 /channel set by {interaction.user} in guild {guild_id} → #{channel.name}")
+
+
+@bot.tree.command(name="ban", description="🚫 Block a user from using the bot by their Discord ID (Admin only)")
+@app_commands.describe(user_id="The Discord user ID to ban")
+async def ban_user(interaction: discord.Interaction, user_id: str) -> None:
+    lang = get_user_lang(interaction)
+    if not is_admin(interaction.user.id) and not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message(TRANSLATIONS[lang]["not_admin"], ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
     try:
         uid = int(user_id.strip())
     except ValueError:
@@ -1732,49 +1401,42 @@ async def ban_user(interaction: discord.Interaction, user_id: str) -> None:
         await interaction.followup.send(f"⚠️ User `{uid}` is already banned.", ephemeral=True)
         return
 
-    # Try to resolve username for the log entry
     username = str(uid)
     try:
-        target = await bot.fetch_user(uid)
+        target   = await bot.fetch_user(uid)
         username = str(target)
     except Exception:
         pass
 
-    # Update in-memory cache immediately
     _banned_user_ids.add(uid)
     _ban_attempt_counts.setdefault(uid, 0)
-
-    # Persist to GitHub asynchronously
     success = await asyncio.to_thread(add_ban_to_github, uid, username)
 
-    lang = get_user_lang(interaction)
     if success:
-        log.info(f"🚫 Admin {interaction.user} banned user {username} (ID: {uid})")
+        log.info(f"🚫 Admin {interaction.user} banned {username} (ID: {uid})")
         msg = (
-            f"✅ User `{username}` (ID: `{uid}`) has been **banned** and added to ban-users.txt."
+            f"✅ User `{username}` (ID: `{uid}`) has been **banned**."
             if lang == "en"
-            else f"\u200f✅ تم حظر المستخدم `{username}` (ID: `{uid}`) وإضافته إلى قائمة الحظر."
+            else f"\u200f✅ تم حظر المستخدم `{username}` (ID: `{uid}`)."
         )
     else:
         msg = (
-            f"⚠️ User `{uid}` banned locally but **GitHub push failed** – check bot logs."
+            f"⚠️ User `{uid}` banned locally but **GitHub push failed**."
             if lang == "en"
-            else f"\u200f⚠️ تم الحظر محليًا لكن **فشل الرفع إلى GitHub** – راجع سجلات البوت."
+            else f"\u200f⚠️ تم الحظر محليًا لكن **فشل الرفع إلى GitHub**."
         )
     await interaction.followup.send(msg, ephemeral=True)
 
 
-# ╔══════════════════════════════════════════════════════════════╗
-# ║               /unban COMMAND  (Admin only)                  ║
-# ║  Removes a user ban by ID.                                  ║
-# ╚══════════════════════════════════════════════════════════════╝
 @bot.tree.command(name="unban", description="✅ Remove a bot ban for a user by their Discord ID (Admin only)")
 @app_commands.describe(user_id="The Discord user ID to unban")
-@app_commands.default_permissions(administrator=True)
-@app_commands.guilds(*[discord.Object(id=gid) for gid in ALLOWED_GUILD_IDS])
 async def unban_user(interaction: discord.Interaction, user_id: str) -> None:
-    await interaction.response.defer(ephemeral=True)
+    lang = get_user_lang(interaction)
+    if not is_admin(interaction.user.id) and not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message(TRANSLATIONS[lang]["not_admin"], ephemeral=True)
+        return
 
+    await interaction.response.defer(ephemeral=True)
     try:
         uid = int(user_id.strip())
     except ValueError:
@@ -1785,86 +1447,219 @@ async def unban_user(interaction: discord.Interaction, user_id: str) -> None:
         await interaction.followup.send(f"⚠️ User `{uid}` is not currently banned.", ephemeral=True)
         return
 
-    # Update in-memory cache immediately
     _banned_user_ids.discard(uid)
     attempts = _ban_attempt_counts.pop(uid, 0)
+    success  = await asyncio.to_thread(remove_ban_from_github, uid)
 
-    # Persist to GitHub asynchronously
-    success = await asyncio.to_thread(remove_ban_from_github, uid)
-
-    lang = get_user_lang(interaction)
     if success:
-        log.info(f"✅ Admin {interaction.user} unbanned user ID {uid} (had {attempts} attempt(s))")
+        log.info(f"✅ Admin {interaction.user} unbanned user {uid} (had {attempts} attempt(s))")
         msg = (
-            f"✅ User `{uid}` has been **unbanned**. They had made **{attempts}** blocked attempt(s)."
+            f"✅ User `{uid}` has been **unbanned**. They had **{attempts}** blocked attempt(s)."
             if lang == "en"
             else f"\u200f✅ تم رفع الحظر عن المستخدم `{uid}`. كان لديه **{attempts}** محاولة محظورة."
         )
     else:
         msg = (
-            f"⚠️ User `{uid}` unbanned locally but **GitHub push failed** – check bot logs."
+            f"⚠️ User `{uid}` unbanned locally but **GitHub push failed**."
             if lang == "en"
-            else f"\u200f⚠️ تم رفع الحظر محليًا لكن **فشل الرفع إلى GitHub** – راجع سجلات البوت."
+            else f"\u200f⚠️ تم رفع الحظر محليًا لكن **فشل الرفع إلى GitHub**."
         )
     await interaction.followup.send(msg, ephemeral=True)
 
 
-# ╔══════════════════════════════════════════════════════════════╗
-# ║                       BOT EVENTS                            ║
-# ║  UPDATED: multi-guild logging and sync                      ║
-# ╚══════════════════════════════════════════════════════════════╝
+admin_group = app_commands.Group(
+    name="admin",
+    description="👮 Manage bot admins",
+)
+
+
+@admin_group.command(name="add", description="👮 Add a user to the bot admin list")
+@app_commands.describe(user_id="Discord user ID to grant admin access")
+async def admin_add(interaction: discord.Interaction, user_id: str) -> None:
+    lang = get_user_lang(interaction)
+
+    if not is_owner(interaction.user.id):
+        await interaction.response.send_message(TRANSLATIONS[lang]["not_admin"], ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+    try:
+        uid = int(user_id.strip())
+    except ValueError:
+        await interaction.followup.send("❌ Invalid user ID – must be numeric.", ephemeral=True)
+        return
+
+    if uid in _admin_registry:
+        await interaction.followup.send(f"⚠️ User `{uid}` is already an admin.", ephemeral=True)
+        return
+
+    username = str(uid)
+    try:
+        target   = await bot.fetch_user(uid)
+        username = str(target)
+    except Exception:
+        pass
+
+    now_str = datetime.now(EGYPT_TZ).strftime("%Y-%m-%d %H:%M:%S")
+    _admin_registry[uid] = {
+        "username": username,
+        "added_by": str(interaction.user),
+        "added_at": now_str,
+    }
+    success = await asyncio.to_thread(save_admins_to_github, _admin_registry)
+
+    log.info(f"👮 Owner {interaction.user} added admin {username} (ID: {uid})")
+    msg = (
+        f"✅ `{username}` (ID: `{uid}`) has been added as a **bot admin**."
+        if lang == "en"
+        else f"\u200f✅ تمت إضافة `{username}` (ID: `{uid}`) كـ **مسؤول بوت**."
+    ) if success else (
+        f"✅ `{uid}` added locally but **GitHub push failed**."
+        if lang == "en"
+        else f"\u200f✅ تمت الإضافة محليًا لكن **فشل الرفع إلى GitHub**."
+    )
+    await interaction.followup.send(msg, ephemeral=True)
+
+
+@admin_group.command(name="remove", description="👮 Remove a user from the bot admin list")
+@app_commands.describe(user_id="Discord user ID to revoke admin access")
+async def admin_remove(interaction: discord.Interaction, user_id: str) -> None:
+    lang    = get_user_lang(interaction)
+    invoker = interaction.user.id
+
+    if invoker not in _PRIVILEGED_IDS:
+        await interaction.response.send_message(TRANSLATIONS[lang]["not_admin"], ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+    try:
+        uid = int(user_id.strip())
+    except ValueError:
+        await interaction.followup.send("❌ Invalid user ID – must be numeric.", ephemeral=True)
+        return
+
+    if uid == BOT_OWNER_ID and invoker != BOT_OWNER_ID:
+        await interaction.followup.send("❌ You cannot remove the bot owner.", ephemeral=True)
+        return
+
+    if uid not in _admin_registry:
+        await interaction.followup.send(f"⚠️ User `{uid}` is not in the admin list.", ephemeral=True)
+        return
+
+    removed_info = _admin_registry.pop(uid)
+    success      = await asyncio.to_thread(save_admins_to_github, _admin_registry)
+
+    log.info(f"👮 {interaction.user} removed admin {removed_info['username']} (ID: {uid})")
+    msg = (
+        f"✅ `{removed_info['username']}` (ID: `{uid}`) has been **removed** from admins."
+        if lang == "en"
+        else f"\u200f✅ تمت إزالة `{removed_info['username']}` (ID: `{uid}`) من المسؤولين."
+    ) if success else (
+        f"✅ `{uid}` removed locally but **GitHub push failed**."
+        if lang == "en"
+        else f"\u200f✅ تمت الإزالة محليًا لكن **فشل الرفع إلى GitHub**."
+    )
+    await interaction.followup.send(msg, ephemeral=True)
+
+
+@admin_group.command(name="list", description="👮 List all current bot admins")
+async def admin_list(interaction: discord.Interaction) -> None:
+    lang = get_user_lang(interaction)
+
+    if interaction.user.id not in _PRIVILEGED_IDS:
+        await interaction.response.send_message(TRANSLATIONS[lang]["not_admin"], ephemeral=True)
+        return
+
+    embed = discord.Embed(
+        title="👮 Bot Admin List  |  قائمة المسؤولين",
+        color=discord.Color.gold(),
+        timestamp=datetime.now(EGYPT_TZ),
+    )
+
+    embed.add_field(
+        name=f"👑 X2 Salah (ID: {BOT_OWNER_ID})",
+        value="Role: **Bot Owner** – permanent full access",
+        inline=False,
+    )
+    embed.add_field(
+        name=f"⭐ キルア (ID: {BOT_COADMIN_ID})",
+        value="Role: **Co-Admin** – can remove admins (except owner)",
+        inline=False,
+    )
+
+    if _admin_registry:
+        embed.add_field(name="─────────────", value="**Additional Admins:**", inline=False)
+        for uid, info in _admin_registry.items():
+            embed.add_field(
+                name=f"{info['username']} (ID: {uid})",
+                value=f"Added by: `{info['added_by']}`\nDate: `{info['added_at']}`",
+                inline=False,
+            )
+    else:
+        embed.add_field(name="─────────────", value="*No additional admins.*", inline=False)
+
+    embed.set_footer(text=FOOTER_TEXT)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+bot.tree.add_command(admin_group)
+
+
 @bot.event
 async def on_ready() -> None:
     log.info("━" * 60)
     log.info(f"🤖 Logged in as : {bot.user}  (ID: {bot.user.id})")
-    # UPDATED: log all allowed guilds
-    log.info(f"🏠 Allowed guilds: {ALLOWED_GUILD_IDS}")
-    # NEW: log cookie source
+    if ALLOWED_GUILD_IDS:
+        log.info(f"🏠 Guild restriction : {ALLOWED_GUILD_IDS}")
+    else:
+        log.info("🌐 Guild restriction : NONE (global bot)")
+
     if COOKIES_GITHUB_REPO:
         log.info(f"🍪 Cookie source : GitHub → {COOKIES_GITHUB_REPO}/{COOKIES_GITHUB_PATH} [{COOKIES_GITHUB_BRANCH}]")
     else:
         log.info(f"🍪 Cookie source : Local → {COOKIES_FOLDER.resolve()}")
 
-    # NEW: Initialize persistent config (PostgreSQL or file fallback)
     await config.init_db()
 
-    # NEW: Load ban list from GitHub into memory
     global _banned_user_ids
     _banned_user_ids = await asyncio.to_thread(load_banned_users_from_github)
-    log.info(f"🚫 Ban list loaded: {len(_banned_user_ids)} banned user(s)")
+    log.info(f"🚫 Ban list: {len(_banned_user_ids)} banned user(s)")
 
-    # NEW: log channel config state on startup
-    for gid in ALLOWED_GUILD_IDS:
-        ch = config.get_channel_for_guild(gid)
-        if ch:
-            log.info(f"📌 Guild {gid} → channel {ch} (configured)")
-        else:
-            log.warning(f"⚠️ Guild {gid} → no channel configured (set DEFAULT_CHANNEL_ID or run /channel)")
+    global _admin_registry
+    _admin_registry = await asyncio.to_thread(load_admins_from_github)
+    log.info(f"👮 Admin list: {len(_admin_registry)} admin(s)")
+
+    _load_setup_tracker()
+
+    if ALLOWED_GUILD_IDS:
+        for gid in ALLOWED_GUILD_IDS:
+            ch = config.get_channel_for_guild(gid)
+            if ch:
+                log.info(f"📌 Guild {gid} → channel {ch}")
+            else:
+                log.warning(f"⚠️ Guild {gid} → no channel configured (run /channel)")
+
     if GITHUB_REPO and GITHUB_FILE_PATH:
-        log.info(f"📡 GitHub log target: {GITHUB_REPO}/{GITHUB_FILE_PATH}")
-    else:
-        log.warning("⚠️ GitHub logging is DISABLED – REMOTE_LOG_URL not set or invalid")
-    if BAN_USERS_GITHUB_REPO and BAN_USERS_GITHUB_PATH:
-        log.info(f"🚫 Ban list target: {BAN_USERS_GITHUB_REPO}/{BAN_USERS_GITHUB_PATH} ({len(_banned_user_ids)} banned)")
-    else:
-        log.warning("⚠️ Ban list is DISABLED – BAN_USERS_URL not set or invalid")
+        log.info(f"📡 GitHub log: {GITHUB_REPO}/{GITHUB_FILE_PATH}")
     log.info("━" * 60)
 
     bot.tree.interaction_check = global_interaction_check
 
-    # UPDATED: sync commands to ALL allowed guilds
-    for guild_id in ALLOWED_GUILD_IDS:
-        guild_obj = discord.Object(id=guild_id)
+    if ALLOWED_GUILD_IDS:
+        for guild_id in ALLOWED_GUILD_IDS:
+            try:
+                synced = await bot.tree.sync(guild=discord.Object(id=guild_id))
+                log.info(f"✅ Synced {len(synced)} command(s) to guild {guild_id}")
+            except Exception as exc:
+                log.error(f"❌ Failed to sync commands to guild {guild_id}: {exc}")
+    else:
         try:
-            synced = await bot.tree.sync(guild=guild_obj)
-            log.info(f"✅ Synced {len(synced)} slash command(s) to guild {guild_id}")
-        except Exception as e:
-            log.error(f"❌ Failed to sync commands to guild {guild_id}: {e}")
+            synced = await bot.tree.sync()
+            log.info(f"✅ Synced {len(synced)} command(s) globally")
+        except Exception as exc:
+            log.error(f"❌ Failed to sync global commands: {exc}")
 
 
-# ╔══════════════════════════════════════════════════════════════╗
-# ║                        ENTRY POINT                          ║
-# ╚══════════════════════════════════════════════════════════════╝
 if __name__ == "__main__":
     COOKIES_FOLDER.mkdir(exist_ok=True)
     bot.run(DISCORD_BOT_TOKEN)
