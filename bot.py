@@ -957,8 +957,7 @@ def _build_rules_embed() -> discord.Embed:
         name="🇬🇧 Rules (English)",
         value=(
             "⚠️ **Rule 1:** Do not create more than one account within 24 hours (one day).\n\n"
-            "🚫 **Rule 2:** Any suspicious use of the bot will result in the user being "
-            "permanently banned from using the bot.\n\n"
+            "🚫 **Rule 2:** Any suspicious activity will result in a permanent ban.\n\n"
             "✅ **Rule 3:** Links are for personal use only – do **not** share them with others.\n\n"
             "🔄 **Rule 4:** Messages auto-delete after **1 minute** for privacy."
         ),
@@ -969,7 +968,7 @@ def _build_rules_embed() -> discord.Embed:
         name="🇸🇦 القواعد (العربية)",
         value=(
             "⚠️ **القاعدة 1:** يُمنع إنشاء أكثر من حساب خلال 24 ساعة (يوم واحد).\n\n"
-            "🚫 **القاعدة 2:** أي استخدام مشبوه للبوت سيؤدي إلى حظر المستخدم نهائياً من استخدام البوت.\n\n"
+            "🚫 **القاعدة 2:** أي نشاط مشبوه يؤدي إلى حظر دائم.\n\n" 
             "✅ **القاعدة 3:** الروابط للاستخدام الشخصي فقط – يُمنع مشاركتها مع الآخرين.\n\n"
             "🔄 **القاعدة 4:** يتم حذف الرسائل تلقائياً بعد **دقيقة واحدة** لحماية الخصوصية."
         ),
