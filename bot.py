@@ -614,6 +614,66 @@ def update_users_txt_on_github(new_line: str) -> bool:
     )
 
 
+COOLDOWN_HOURS = 24
+
+
+def check_user_cooldown(user_id: int) -> tuple[bool, float]:
+    """
+    Check if the user is within the 24-hour cooldown period.
+
+    Returns:
+        (is_on_cooldown: bool, remaining_hours: float)
+        If not on cooldown → (False, 0.0)
+        If on cooldown    → (True,  hours_remaining)
+
+    Only ✅ Success entries count; failed/error attempts are ignored.
+    Admins are always exempt.
+    """
+    if is_admin(user_id):
+        return False, 0.0
+
+    if not GITHUB_REPO or not GITHUB_FILE_PATH:
+        return False, 0.0
+
+    raw, _ = _read_github_file(GITHUB_REPO, GITHUB_FILE_PATH)
+    if not raw:
+        return False, 0.0
+
+    user_id_str     = str(user_id)
+    last_success_dt: datetime | None = None
+
+    for line in raw.splitlines():
+        # Only care about successful generations for this user
+        if f"🆔 ID: {user_id_str}" not in line:
+            continue
+        if "📊 Status: ✅ Success" not in line:
+            continue
+        # Parse timestamp: "[2026-05-26 19:52:07 EGY]"
+        try:
+            ts_part = line.split("]")[0].lstrip("[").strip()
+            # Remove trailing timezone label (e.g. " EGY")
+            ts_clean = " ".join(ts_part.split()[:2])
+            entry_dt = datetime.strptime(ts_clean, "%Y-%m-%d %H:%M:%S").replace(
+                tzinfo=EGYPT_TZ
+            )
+            if last_success_dt is None or entry_dt > last_success_dt:
+                last_success_dt = entry_dt
+        except Exception:
+            continue
+
+    if last_success_dt is None:
+        return False, 0.0
+
+    now_egypt      = datetime.now(EGYPT_TZ)
+    elapsed_hours  = (now_egypt - last_success_dt).total_seconds() / 3600.0
+
+    if elapsed_hours < COOLDOWN_HOURS:
+        remaining = COOLDOWN_HOURS - elapsed_hours
+        return True, remaining
+
+    return False, 0.0
+
+
 def save_channel_link_to_github(guild_id: int, guild_name: str, channel_id: int, channel_name: str) -> None:
     if not CHANNEL_LOG_GITHUB_REPO or not CHANNEL_LOG_GITHUB_PATH:
         return
@@ -799,6 +859,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "wrong_channel_with_config": "❌ This command can only be used in {channel}.",
         "wrong_guild":            "❌ This bot is not available in this server.",
         "not_admin":              "❌ You do not have permission to use this command.",
+        "cooldown":               "⏳ You already generated a link recently.\n\n⌛ Please wait **{hours}h {minutes}m** before creating another one.",
         "setup_desc": (
             "Welcome! 👋 Use the `/create` command to generate a Netflix PC login link.\n\n"
             "**📋 How to use:**\n"
@@ -836,6 +897,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "wrong_channel_with_config": "\u200f❌ لا يمكن استخدام هذا الأمر إلا في {channel}.",
         "wrong_guild":            "\u200f❌ هذا البوت غير متاح في هذا السيرفر.",
         "not_admin":              "\u200f❌ ليس لديك صلاحية استخدام هذا الأمر.",
+        "cooldown":               "\u200f⏳ لقد حصلت على رابط مؤخراً.\n\n\u200f⌛ انتظر **{hours} ساعة و{minutes} دقيقة** قبل إنشاء رابط جديد.",
         "setup_desc": (
             "مرحباً! 👋 استخدم أمر `/create` لإنشاء رابط تسجيل دخول لـ نتفليكس.\n\n"
             "**📋 طريقة الاستخدام:**\n"
@@ -1452,6 +1514,25 @@ async def create(interaction: discord.Interaction) -> None:
                 TRANSLATIONS[user_lang]["wrong_channel_with_config"].format(channel=mention), ephemeral=True
             )
         return
+
+    # ── 24-hour cooldown check ──────────────────────────────────────────────
+    on_cooldown, remaining_hours = await asyncio.to_thread(
+        check_user_cooldown, interaction.user.id
+    )
+    if on_cooldown:
+        total_minutes  = int(remaining_hours * 60)
+        hours_left     = total_minutes // 60
+        minutes_left   = total_minutes % 60
+        msg = TRANSLATIONS[user_lang]["cooldown"].format(
+            hours=hours_left, minutes=minutes_left
+        )
+        await interaction.response.send_message(msg, ephemeral=True)
+        log.info(
+            f"⏳ Cooldown: {interaction.user} (ID: {interaction.user.id}) "
+            f"blocked – {hours_left}h {minutes_left}m remaining"
+        )
+        return
+    # ───────────────────────────────────────────────────────────────────────
 
     view = LanguageSelectView(interaction)
     await interaction.response.send_message(TRANSLATIONS["en"]["lang_prompt"], view=view, ephemeral=True)
