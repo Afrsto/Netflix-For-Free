@@ -860,6 +860,8 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "wrong_guild":            "❌ This bot is not available in this server.",
         "not_admin":              "❌ You do not have permission to use this command.",
         "cooldown":               "⏳ You already generated a link recently.\n\n⌛ Please wait **{hours}h {minutes}m** before creating another one.",
+        "retry_prompt":           "❌ The attempt failed. Please try again.\n\n❌ فشلت المحاولة. يرجى المحاولة مرة أخرى.\n\n🔄 **Try Again | حاول مرة أخرى**",
+        "retry_button":           "🔄 Try Again | حاول مرة أخرى",
         "setup_desc": (
             "Welcome! 👋 Use the `/create` command to generate a Netflix PC login link.\n\n"
             "**📋 How to use:**\n"
@@ -898,6 +900,8 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "wrong_guild":            "\u200f❌ هذا البوت غير متاح في هذا السيرفر.",
         "not_admin":              "\u200f❌ ليس لديك صلاحية استخدام هذا الأمر.",
         "cooldown":               "\u200f⏳ لقد حصلت على رابط مؤخراً.\n\n\u200f⌛ انتظر **{hours} ساعة و{minutes} دقيقة** قبل إنشاء رابط جديد.",
+        "retry_prompt":           "❌ The attempt failed. Please try again.\n\n❌ فشلت المحاولة. يرجى المحاولة مرة أخرى.\n\n🔄 **Try Again | حاول مرة أخرى**",
+        "retry_button":           "🔄 Try Again | حاول مرة أخرى",
         "setup_desc": (
             "مرحباً! 👋 استخدم أمر `/create` لإنشاء رابط تسجيل دخول لـ نتفليكس.\n\n"
             "**📋 طريقة الاستخدام:**\n"
@@ -1269,6 +1273,44 @@ async def global_interaction_check(interaction: discord.Interaction) -> bool:
     return True
 
 
+class RetryView(discord.ui.View):
+    """Shown to the user after a failed attempt so they can retry without re-running /create."""
+
+    def __init__(self, original_interaction: discord.Interaction, language: str) -> None:
+        super().__init__(timeout=120)
+        self.original_interaction = original_interaction
+        self.language = language
+
+    @discord.ui.button(label="🔄 Try Again | حاول مرة أخرى", style=discord.ButtonStyle.danger)
+    async def retry_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        if interaction.user.id != self.original_interaction.user.id:
+            await interaction.response.send_message(
+                TRANSLATIONS[self.language]["not_for_you"], ephemeral=True
+            )
+            return
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(
+            content=TRANSLATIONS[self.language]["progress"], view=None
+        )
+        # Re-run the full generation flow via a fresh ConfirmView-like call
+        view = LanguageSelectView(interaction)
+        await interaction.followup.send(
+            TRANSLATIONS["en"]["lang_prompt"], view=view, ephemeral=True
+        )
+        self.stop()
+
+    async def on_timeout(self) -> None:
+        for child in self.children:
+            child.disabled = True
+        try:
+            await self.original_interaction.edit_original_response(
+                content=TRANSLATIONS[self.language]["timeout_msg"], view=None
+            )
+        except Exception:
+            pass
+
+
 class LanguageSelectView(discord.ui.View):
     def __init__(self, original_interaction: discord.Interaction) -> None:
         super().__init__(timeout=60)
@@ -1462,7 +1504,11 @@ class ConfirmView(discord.ui.View):
             await log_user_activity(interaction, "✅ Success", "Link generated",
                                     used_txt_files=[chosen_file_name], language=lang, quality=quality_key)
         else:
-            await interaction.edit_original_response(content=t["cookie_invalid"])
+            retry_view = RetryView(interaction, lang)
+            await interaction.edit_original_response(
+                content=TRANSLATIONS["en"]["retry_prompt"],
+                view=retry_view,
+            )
             await log_user_activity(interaction, "❌ Failed", "Cookie invalid",
                                     used_txt_files=[chosen_file_name], language=lang, quality=quality_key)
 
