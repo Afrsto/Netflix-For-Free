@@ -1908,7 +1908,7 @@ async def admin_list(interaction: discord.Interaction) -> None:
         inline=False,
     )
     embed.add_field(
-        name=f"⭐ キルア (ID: {BOT_COADMIN_ID})",
+        name=f"⭐ HASHO_Z (ID: {BOT_COADMIN_ID})",
         value="Role: **Co-Admin** – can remove admins (except owner)",
         inline=False,
     )
