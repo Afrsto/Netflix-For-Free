@@ -11,8 +11,6 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 from urllib.parse import urlparse
 
-from dotenv import load_dotenv
-load_dotenv()
 
 import discord
 from discord import app_commands
