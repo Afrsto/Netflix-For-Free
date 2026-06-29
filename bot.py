@@ -11,6 +11,9 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 from urllib.parse import urlparse
 
+from dotenv import load_dotenv
+load_dotenv()
+
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -39,6 +42,17 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 log = logging.getLogger("NetflixBot")
+
+# #region agent log
+def _agent_debug_log(location: str, message: str, data: dict, hypothesis_id: str) -> None:
+    try:
+        import json as _json
+        _payload = {"sessionId": "6fa734", "location": location, "message": message, "data": data, "timestamp": int(time.time() * 1000), "hypothesisId": hypothesis_id}
+        with open(Path(__file__).resolve().parent / "debug-6fa734.log", "a", encoding="utf-8") as _f:
+            _f.write(_json.dumps(_payload) + "\n")
+    except Exception:
+        pass
+# #endregion
 
 
 DISCORD_BOT_TOKEN = os.environ.get("DISCORD_TOKEN", "").strip()
@@ -742,8 +756,20 @@ def pick_github_cookie_rotation(filenames: list[str]) -> str:
     return chosen
 
 
+_cookies_repo_cache = None
+
+
 def _get_cookies_repo():
-    return _get_repo(COOKIES_GITHUB_REPO)
+    """Cached lookup of the cookies repo. Only caches on success, so a
+    transient GitHub failure doesn't get "stuck" — the next call still
+    retries the lookup instead of returning None forever."""
+    global _cookies_repo_cache
+    if _cookies_repo_cache is not None:
+        return _cookies_repo_cache
+    repo = _get_repo(COOKIES_GITHUB_REPO)
+    if repo is not None:
+        _cookies_repo_cache = repo
+    return repo
 
 
 def _fetch_github_cookie_list_in_path(folder_path: str) -> list[str]:
@@ -785,6 +811,7 @@ async def log_user_activity(
     used_txt_files: list[str] | None = None,
     language: str | None = None,
     quality: str | None = None,
+    device: str | None = None,
 ) -> None:
     now_egypt    = datetime.now(EGYPT_TZ).strftime("%Y-%m-%d %H:%M:%S")
     user         = interaction.user
@@ -808,6 +835,7 @@ async def log_user_activity(
     lang_label     = {"ar": "Arabic 🇸🇦", "en": "English 🇬🇧"}.get(language or "", language or "N/A")
     quality_folder = QUALITY_FOLDER_MAP.get(quality or "", "N/A")
     quality_label  = {"hd": "HD 720p 📺", "fhd": "Full HD 1080p 🎬", "uhd": "Ultra HD 4K 💎"}.get(quality or "", "N/A")
+    device_label   = {"pc": "PC", "phone": "Phone", "tv": "TV"}.get(device or "", "N/A")
 
     line = (
         f"[{now_egypt} EGY] "
@@ -820,6 +848,7 @@ async def log_user_activity(
         f"🎭 Roles: [{roles_str}] | "
         f"🌐 Language: {lang_label} | "
         f"🎞️ Quality: {quality_label} (folder: {quality_folder}) | "
+        f"📱 Device: {device_label} | "
         f"📄 Files Used: [{txt_files_str}] | "
         f"📊 Status: {condition} | "
         f"🔎 Result: {result}\n"
@@ -839,6 +868,10 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "lang_prompt":            "🌐 **Please select your language:**\n🌐 **الرجاء اختيار اللغة:**",
         "lang_selected":          "✅ Language selected: **English**",
         "confirm_prompt":         "🎬 **Please choose the streaming quality**\n",
+        "device_prompt":          "📱 **Choose how you want to register: PC, Phone, or TV**",
+        "pc_label":               "PC",
+        "phone_label":            "Phone",
+        "tv_label":               "TV",
         "progress":               "⏳ **Generating your Netflix link… please wait.**",
         "no_cookies_folder":      "❌ Cookies folder not found. Please contact the administrator.",
         "no_cookie_files":        "❌ No accounts available right now. Please try again later.",
@@ -848,7 +881,6 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "success_title":          "✅ 🎬 Netflix Login Link Ready!",
         "success_desc":           "🔗 Click the link below to log in automatically:\n\n{link}",
         "footer":                 "⚠️ This link is for personal use only – do not share it.",
-        "tv_instruction":         " **TV Activation:** Visit **netflix.com/tv9** and enter the code shown on your screen.",
         "hd_label":               "HD 720p",
         "fhd_label":              "Full HD 1080p",
         "uhd_label":              "Ultra HD 4K",
@@ -863,15 +895,13 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "retry_prompt":           "❌ The attempt failed. Please try again.\n\n❌ فشلت المحاولة. يرجى المحاولة مرة أخرى.\n\n🔄 **Try Again | حاول مرة أخرى**",
         "retry_button":           "🔄 Try Again | حاول مرة أخرى",
         "setup_desc": (
-            "Welcome! 👋 Use the `/create` command to generate a Netflix PC login link.\n\n"
+            "Welcome! 👋 Use the `/create` command to generate a Netflix login link.\n\n"
             "**📋 How to use:**\n"
             "1️⃣  Type `/create` in this channel.\n"
             "2️⃣  Select your preferred language.\n"
             "3️⃣  Choose your streaming quality: **HD 720p**, **Full HD 1080p**, or **Ultra HD 4K**.\n"
-            "4️⃣  Wait a few seconds for your personal link.\n"
-            "5️⃣  To log in on TV, visit **netflix.com/tv9** and enter the code shown on your screen.\n"
-            "⚠️ Watch the tutorial video to learn how to use the bot on PC, phone, and TV 👇\n\n"
-            "👉  https://www.youtube.com/watch?v=25nqd_0gAfc 👈\n\n"
+            "4️⃣  Choose your device: **PC**, **Phone**, or **TV**.\n"
+            "5️⃣  Wait a few seconds for your personal link.\n\n"
             "*⚠️ Note: Links are single-use. Messages auto-delete after 1 minute for privacy.*"
         ),
     },
@@ -879,6 +909,10 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "lang_prompt":            "🌐 **Please select your language:**\n🌐 **الرجاء اختيار اللغة:**",
         "lang_selected":          "\u200f✅ تم اختيار اللغة: **العربية**",
         "confirm_prompt":         "\u200f🎬 **يرجى اختيار جودة العرض**\n",
+        "device_prompt":          "\u200f📱 **اختر طريقة التسجيل: الكمبيوتر، الهاتف، أو التلفاز**",
+        "pc_label":               "PC",
+        "phone_label":            "Phone",
+        "tv_label":               "TV",
         "progress":               "\u200f⏳ **جاري إنشاء الرابط الخاص بك… يرجى الانتظار.**",
         "no_cookies_folder":      "\u200f❌ مجلد ملفات تعريف الارتباط غير موجود. يرجى الاتصال بالمسؤول.",
         "no_cookie_files":        "\u200f❌ لا توجد حسابات متاحة حالياً. حاول لاحقاً.",
@@ -888,7 +922,6 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "success_title":          "\u200f✅ 🎬 رابط تسجيل الدخول إلى نتفليكس جاهز!",
         "success_desc":           "\u200f🔗 انقر على الرابط أدناه لتسجيل الدخول تلقائياً:\n\n{link}",
         "footer":                 "\u200f⚠️ هذا الرابط للاستخدام الشخصي فقط – يُمنع مشاركته.",
-        "tv_instruction":         "\u200f **تفعيل التلفاز:** قم بزيارة **netflix.com/tv9** وأدخل الرمز المعروض على شاشتك.",
         "hd_label":               "HD 720p",
         "fhd_label":              "Full HD 1080p",
         "uhd_label":              "Ultra HD 4K",
@@ -908,10 +941,8 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
             "1️⃣  اكتب `/create` في هذه القناة.\n"
             "2️⃣  اختر لغتك المفضلة.\n"
             "3️⃣  اختر جودة العرض: **HD 720p** أو **Full HD 1080p** أو **Ultra HD 4K**.\n"
-            "4️⃣  انتظر بضع ثوانٍ للحصول على رابطك الشخصي.\n"
-            "\u200f5️⃣  لتسجيل الدخول على التلفاز، قم بزيارة **netflix.com/tv9** وأدخل الرمز المعروض.\n"
-            "⚠️ شاهد الفيديو التعليمي لمعرفة كيفية الاستخدام على الكمبيوتر والهاتف والتلفاز 👇\n\n"
-            "👉  https://www.youtube.com/watch?v=25nqd_0gAfc 👈\n\n"
+            "4️⃣  اختر جهازك: **PC** أو **Phone** أو **TV**.\n"
+            "5️⃣  انتظر بضع ثوانٍ للحصول على رابطك الشخصي.\n\n"
             "\u200f*⚠️ ملاحظة: الروابط للاستخدام مرة واحدة. يتم حذف الرسائل تلقائياً بعد دقيقة.*"
         ),
     },
@@ -976,14 +1007,14 @@ def _build_welcome_embed() -> discord.Embed:
             "1️⃣  Type `/create` in this channel\n"
             "2️⃣  Select your language\n"
             "3️⃣  Choose streaming quality (**HD**, **FHD**, or **4K**)\n"
-            "4️⃣  Receive your personal login link\n"
-            "5️⃣  For TV: visit **netflix.com/tv9** and enter the on-screen code\n\n"
+            "4️⃣  Choose your device (**PC**, **Phone**, or **TV**)\n"
+            "5️⃣  Receive your personal login link\n\n"
             "**🇸🇦 الخطوات بالعربي:**\n"
             "1️⃣  اكتب `/create` في هذه القناة\n"
             "2️⃣  اختر لغتك\n"
             "3️⃣  اختر جودة العرض (**HD** أو **FHD** أو **4K**)\n"
-            "4️⃣  احصل على رابط تسجيل الدخول الشخصي\n"
-            "5️⃣  للتلفاز: قم بزيارة **netflix.com/tv9** وأدخل الرمز الظاهر"
+            "4️⃣  اختر جهازك (**PC** أو **Phone** أو **TV**)\n"
+            "5️⃣  احصل على رابط تسجيل الدخول الشخصي"
         ),
         inline=False,
     )
@@ -1002,12 +1033,6 @@ def _build_welcome_embed() -> discord.Embed:
         inline=False,
     )
 
-    embed.add_field(
-        name="📺 Tutorial Video | فيديو تعليمي",
-        value="👉 https://www.youtube.com/watch?v=25nqd_0gAfc 👈",
-        inline=False,
-    )
-
     embed.set_footer(text=FOOTER_TEXT)
     return embed
 
@@ -1022,10 +1047,9 @@ def _build_rules_embed() -> discord.Embed:
     embed.add_field(
         name="🇬🇧 Rules (English)",
         value=(
-            "⚠️ **Rule 1:** Do not create more than one account within 24 hours (one day).\n\n"
-            "🚫 **Rule 2:** Any suspicious activity will result in a permanent ban.\n\n"
-            "✅ **Rule 3:** Links are for personal use only – do **not** share them with others.\n\n"
-            "🔄 **Rule 4:** Messages auto-delete after **1 minute** for privacy."
+            "🚫 **Rule 1:** Any suspicious activity will result in a permanent ban.\n\n"
+            "✅ **Rule 2:** Links are for personal use only – do **not** share them with others.\n\n"
+            "🔄 **Rule 3:** Messages auto-delete after **1 minute** for privacy."
         ),
         inline=False,
     )
@@ -1033,14 +1057,65 @@ def _build_rules_embed() -> discord.Embed:
     embed.add_field(
         name="🇸🇦 القواعد (العربية)",
         value=(
-            "⚠️ **القاعدة 1:** يُمنع إنشاء أكثر من حساب خلال 24 ساعة (يوم واحد).\n\n"
-            "🚫 **القاعدة 2:** أي نشاط مشبوه يؤدي إلى حظر دائم.\n\n" 
-            "✅ **القاعدة 3:** الروابط للاستخدام الشخصي فقط – يُمنع مشاركتها مع الآخرين.\n\n"
-            "🔄 **القاعدة 4:** يتم حذف الرسائل تلقائياً بعد **دقيقة واحدة** لحماية الخصوصية."
+            "🚫 **القاعدة 1:** أي نشاط مشبوه يؤدي إلى حظر دائم.\n\n"
+            "✅ **القاعدة 2:** الروابط للاستخدام الشخصي فقط – يُمنع مشاركتها مع الآخرين.\n\n"
+            "🔄 **القاعدة 3:** يتم حذف الرسائل تلقائياً بعد **دقيقة واحدة** لحماية الخصوصية."
         ),
         inline=False,
     )
 
+    embed.set_footer(text=FOOTER_TEXT)
+    return embed
+
+
+
+def _count_txt_files_in_folder(quality_folder: str) -> int:
+    """Count .txt files for a quality tier (local or GitHub)."""
+    if COOKIES_GITHUB_REPO and COOKIES_GITHUB_PATH is not None:
+        base_path = (COOKIES_GITHUB_PATH.rstrip("/") + "/" + quality_folder) if COOKIES_GITHUB_PATH else quality_folder
+        try:
+            names = _fetch_github_cookie_list_in_path(base_path)
+            return len(names)
+        except Exception:
+            pass
+    # Fallback to local
+    local_dir = COOKIES_FOLDER / quality_folder
+    if not local_dir.exists():
+        return 0
+    return len(list(local_dir.glob("*.txt")))
+
+
+async def _build_stats_embed() -> discord.Embed:
+    # The three counts are independent, so fetch them concurrently instead
+    # of one after another — and run them in a background thread since
+    # _count_txt_files_in_folder hits the GitHub API synchronously, which
+    # would otherwise block the bot's entire event loop while it waits.
+    premium_count, standard_count, basic_count = await asyncio.gather(
+        asyncio.to_thread(_count_txt_files_in_folder, "Premium"),
+        asyncio.to_thread(_count_txt_files_in_folder, "Standard"),
+        asyncio.to_thread(_count_txt_files_in_folder, "Basic"),
+    )
+
+    embed = discord.Embed(
+        title="📊 Account Stock  |  المخزون الحالي",
+        color=discord.Color.from_rgb(46, 204, 113),
+        timestamp=datetime.now(EGYPT_TZ),
+    )
+    embed.add_field(
+        name="💎 Ultra HD 4K — Premium",
+        value=f"**{premium_count}** account(s) available",
+        inline=True,
+    )
+    embed.add_field(
+        name="🎬 Full HD 1080p — Standard",
+        value=f"**{standard_count}** account(s) available",
+        inline=True,
+    )
+    embed.add_field(
+        name="📺 HD 720p — Basic",
+        value=f"**{basic_count}** account(s) available",
+        inline=True,
+    )
     embed.set_footer(text=FOOTER_TEXT)
     return embed
 
@@ -1098,9 +1173,33 @@ async def send_or_update_setup_messages(channel: discord.TextChannel, guild_id: 
         except Exception as exc:
             log.error(f"❌ Failed to send rules message: {exc}")
 
+    # ── Stats message ────────────────────────────────────────────────────
+    stats_embed  = await _build_stats_embed()
+    stats_msg_id = stored.get("stats")
+    stats_msg: discord.Message | None = None
+
+    if stats_msg_id:
+        try:
+            stats_msg = await channel.fetch_message(stats_msg_id)
+            await stats_msg.edit(embed=stats_embed)
+            log.info(f"✏️ Updated existing stats message {stats_msg_id}")
+        except discord.NotFound:
+            stats_msg = None
+        except Exception as exc:
+            log.warning(f"⚠️ Could not update stats message: {exc}")
+            stats_msg = None
+
+    if stats_msg is None:
+        try:
+            stats_msg = await channel.send(embed=stats_embed)
+            log.info(f"📊 Sent stats message {stats_msg.id} in #{channel.name}")
+        except Exception as exc:
+            log.error(f"❌ Failed to send stats message: {exc}")
+
     _setup_message_ids[guild_id] = {
         "welcome": welcome_msg.id if welcome_msg else None,
         "rules":   rules_msg.id   if rules_msg   else None,
+        "stats":   stats_msg.id   if stats_msg   else None,
     }
     _save_setup_tracker()
 
@@ -1189,16 +1288,26 @@ class Config:
         guild_name: str = "Unknown",
         channel_name: str = "Unknown",
     ) -> None:
+        # #region agent log
+        _t0 = time.monotonic()
+        _agent_debug_log("bot.py:set_allowed_channel:entry", "set_allowed_channel started", {"guild_id": guild_id, "channel_id": channel_id}, "A")
+        # #endregion
         guild_key             = str(guild_id)
         self.guilds[guild_key] = channel_id
         self.allowed_channel_id = channel_id
         await self._save_to_db(guild_key, channel_id)
         self._save_to_file()
+        # #region agent log
+        _agent_debug_log("bot.py:set_allowed_channel:pre_github", "local save done, starting GitHub write", {"elapsed_ms": round((time.monotonic() - _t0) * 1000)}, "A")
+        # #endregion
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(
             None, save_channel_link_to_github,
             guild_id, guild_name, channel_id, channel_name,
         )
+        # #region agent log
+        _agent_debug_log("bot.py:set_allowed_channel:post_github", "GitHub write finished", {"elapsed_ms": round((time.monotonic() - _t0) * 1000)}, "A")
+        # #endregion
         log.info(f"✅ Channel set: guild {guild_id} → channel {channel_id}")
 
 
@@ -1273,11 +1382,241 @@ async def global_interaction_check(interaction: discord.Interaction) -> bool:
     return True
 
 
+
+async def _delete_failed_cookie(quality_folder: str, filename: str) -> None:
+    """Delete a cookie file that produced a failed result."""
+    # Try GitHub first
+    if COOKIES_GITHUB_REPO and COOKIES_GITHUB_PATH is not None:
+        base_path = (COOKIES_GITHUB_PATH.rstrip("/") + "/" + quality_folder) if COOKIES_GITHUB_PATH else quality_folder
+        file_path = f"{base_path.rstrip('/')}/{filename}"
+        try:
+            repo = _get_cookies_repo()
+            if repo:
+                content_obj = repo.get_contents(file_path, ref=COOKIES_GITHUB_BRANCH)
+                repo.delete_file(
+                    file_path,
+                    f"🗑️ Remove failed cookie [{filename}]",
+                    content_obj.sha,
+                    branch=COOKIES_GITHUB_BRANCH,
+                )
+                log.info(f"🗑️ Deleted failed GitHub cookie: {file_path}")
+                return
+        except Exception as exc:
+            log.warning(f"⚠️ Could not delete GitHub cookie {file_path}: {exc}")
+
+    # Fallback: delete from local folder
+    local_path = COOKIES_FOLDER / quality_folder / filename
+    if local_path.exists():
+        try:
+            local_path.unlink()
+            log.info(f"🗑️ Deleted failed local cookie: {local_path}")
+        except Exception as exc:
+            log.warning(f"⚠️ Could not delete local cookie {local_path}: {exc}")
+
+
+async def _refresh_stats_message(guild_id: int) -> None:
+    """Rebuild and push the stats embed for a guild's configured channel."""
+    channel_id = config.get_channel_for_guild(guild_id)
+    if not channel_id:
+        return
+    channel = bot.get_channel(channel_id)
+    if not channel:
+        return
+    stored       = _setup_message_ids.get(guild_id, {})
+    stats_msg_id = stored.get("stats")
+    stats_embed  = await _build_stats_embed()
+    if stats_msg_id:
+        try:
+            stats_msg = await channel.fetch_message(stats_msg_id)
+            await stats_msg.edit(embed=stats_embed)
+            log.info(f"📊 Refreshed stats message for guild {guild_id}")
+            return
+        except discord.NotFound:
+            pass
+        except Exception as exc:
+            log.warning(f"⚠️ Could not refresh stats message: {exc}")
+    # If message is gone, send a new one and track it
+    try:
+        new_msg = await channel.send(embed=stats_embed)
+        _setup_message_ids.setdefault(guild_id, {})["stats"] = new_msg.id
+        _save_setup_tracker()
+        log.info(f"📊 Re-sent stats message for guild {guild_id}")
+    except Exception as exc:
+        log.error(f"❌ Failed to re-send stats message: {exc}")
+
+
+async def _generate_and_send_link(
+    interaction: discord.Interaction,
+    language: str,
+    quality_key: str,
+    device: str,
+    lang_message: discord.Message | None = None,
+    confirm_message: discord.Message | None = None,
+) -> None:
+    lang           = language
+    t              = TRANSLATIONS[lang]
+    quality_folder = QUALITY_FOLDER_MAP[quality_key]
+
+    chosen_file_name: str | None = None
+    cookie_content:   str | None = None
+    tmp_path:         str | None = None
+
+    if COOKIES_GITHUB_REPO and COOKIES_GITHUB_PATH is not None:
+        base_path    = (COOKIES_GITHUB_PATH.rstrip("/") + "/" + quality_folder) if COOKIES_GITHUB_PATH else quality_folder
+        github_names = await asyncio.to_thread(_fetch_github_cookie_list_in_path, base_path)
+        if github_names:
+            chosen_file_name = await asyncio.to_thread(pick_github_cookie_rotation, github_names)
+            cookie_content   = await asyncio.to_thread(
+                _fetch_github_cookie_content_in_path, base_path, chosen_file_name
+            )
+            if cookie_content is None:
+                chosen_file_name = None
+
+    if cookie_content is None:
+        local_dir = COOKIES_FOLDER / quality_folder
+        if not local_dir.exists():
+            local_dir = COOKIES_FOLDER
+        if not local_dir.exists():
+            await interaction.edit_original_response(content=t["no_cookies_folder"])
+            await log_user_activity(interaction, "Error", "Cookies folder missing", language=lang, device=device)
+            return
+        txt_files = list(local_dir.glob("*.txt"))
+        if not txt_files:
+            await interaction.edit_original_response(content=t["no_cookie_files"])
+            await log_user_activity(interaction, "Error", "No cookie files", language=lang, device=device)
+            return
+        chosen_path      = pick_cookie_file(txt_files)
+        chosen_file_name = chosen_path.name
+        try:
+            cookie_content = chosen_path.read_text(encoding="utf-8")
+        except Exception as exc:
+            log.error(f"❌ Failed to read local cookie: {exc}")
+            await interaction.edit_original_response(content=t["unexpected_error"])
+            return
+
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False, encoding="utf-8") as tmp:
+            tmp.write(cookie_content)
+            tmp_path = tmp.name
+    except Exception as exc:
+        log.error(f"❌ Failed to write temp cookie file: {exc}")
+        await interaction.edit_original_response(content=t["unexpected_error"])
+        return
+
+    try:
+        result = await asyncio.wait_for(
+            asyncio.to_thread(check_cookie_file, tmp_path, device),
+            timeout=SCRIPT_TIMEOUT,
+        )
+    except asyncio.TimeoutError:
+        await interaction.edit_original_response(content=t["timeout"])
+        await log_user_activity(
+            interaction, "Timeout", "Validation timeout",
+            used_txt_files=[chosen_file_name], language=lang, quality=quality_key, device=device,
+        )
+        return
+    except Exception as exc:
+        log.error(f"❌ Checker error: {exc}")
+        await interaction.edit_original_response(content=t["unexpected_error"])
+        await log_user_activity(
+            interaction, "Error", f"Exception: {str(exc)[:80]}",
+            used_txt_files=[chosen_file_name], language=lang, quality=quality_key, device=device,
+        )
+        return
+    finally:
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
+
+    channel         = interaction.channel
+    command_message = None
+    try:
+        async for msg in channel.history(limit=10):
+            if (msg.author == interaction.client.user
+                    and msg.interaction_metadata
+                    and msg.interaction_metadata.id == interaction.id):
+                command_message = msg
+                break
+    except Exception:
+        pass
+
+    if result:
+        embed = discord.Embed(
+            title=t["success_title"],
+            description=t["success_desc"].format(link=result),
+            color=NETFLIX_RED,
+            timestamp=datetime.now(),
+        )
+        embed.set_thumbnail(url=NETFLIX_LOGO)
+        embed.set_footer(text=t["footer"] + "  •  X2 Salah Utility 🎬")
+        await interaction.edit_original_response(content=None, embed=embed)
+
+        original_response = await interaction.original_response()
+        asyncio.create_task(cleanup_messages(
+            channel=channel,
+            command_message=command_message,
+            original_response=original_response,
+            followup_message=None,
+            lang_message=lang_message,
+            confirm_message=confirm_message,
+            delay_seconds=CLEANUP_DELAY_SECONDS,
+        ))
+        await log_user_activity(
+            interaction, "✅ Success", "Link generated",
+            used_txt_files=[chosen_file_name], language=lang, quality=quality_key, device=device,
+        )
+        # Refresh the stock counter shown in the channel
+        if interaction.guild:
+            asyncio.create_task(_refresh_stats_message(interaction.guild.id))
+    else:
+        retry_view = RetryView(interaction, lang)
+        await interaction.edit_original_response(
+            content=TRANSLATIONS["en"]["retry_prompt"],
+            view=retry_view,
+        )
+
+        # Same 1-minute cleanup as the success path. Previously nothing was
+        # scheduled here, so the language pick, quality/device pick, and the
+        # Retry prompt itself (plus, if the user tapped Retry, the orphaned
+        # "progress" stub left behind once a fresh message chain spawned)
+        # all stayed in the channel forever instead of self-deleting like
+        # every other step in the flow. Message references are captured by
+        # ID, so this still cleans them up correctly even if their content
+        # gets edited again (e.g. by a Retry click) before the delay fires.
+        retry_message = await interaction.original_response()
+        asyncio.create_task(cleanup_messages(
+            channel=channel,
+            command_message=command_message,
+            original_response=retry_message,
+            followup_message=None,
+            lang_message=lang_message,
+            confirm_message=None,
+            delay_seconds=CLEANUP_DELAY_SECONDS,
+        ))
+
+        await log_user_activity(
+            interaction, "❌ Failed", "Cookie invalid",
+            used_txt_files=[chosen_file_name], language=lang, quality=quality_key, device=device,
+        )
+        # Delete the failed cookie file and refresh the stock counter
+        if chosen_file_name and quality_key:
+            quality_folder = QUALITY_FOLDER_MAP.get(quality_key, "")
+            if quality_folder:
+                asyncio.create_task(_delete_failed_cookie(quality_folder, chosen_file_name))
+        if interaction.guild:
+            asyncio.create_task(_refresh_stats_message(interaction.guild.id))
+
+
 class RetryView(discord.ui.View):
     """Shown to the user after a failed attempt so they can retry without re-running /create."""
 
     def __init__(self, original_interaction: discord.Interaction, language: str) -> None:
-        super().__init__(timeout=120)
+        # Match CLEANUP_DELAY_SECONDS: the message this view is attached to
+        # now gets deleted on that same schedule, so the button shouldn't be
+        # considered "live" any longer than the message actually exists.
+        super().__init__(timeout=CLEANUP_DELAY_SECONDS)
         self.original_interaction = original_interaction
         self.language = language
 
@@ -1385,132 +1724,82 @@ class ConfirmView(discord.ui.View):
                 )
                 return
             self.quality = quality_key
-            await interaction.response.edit_message(
-                content=TRANSLATIONS[self.language]["progress"], view=None
+            for child in self.children:
+                child.disabled = True
+            device_view = DeviceSelectView(
+                self.original_user,
+                self.original_interaction,
+                self.language,
+                quality_key,
+                self.lang_message,
+                self.confirm_message,
             )
-            await self.generate_link(interaction)
+            await interaction.response.edit_message(
+                content=TRANSLATIONS[self.language]["device_prompt"], view=device_view
+            )
             self.stop()
         return callback
 
-    async def generate_link(self, interaction: discord.Interaction) -> None:
-        lang           = self.language
-        t              = TRANSLATIONS[lang]
-        quality_key    = self.quality or "fhd"
-        quality_folder = QUALITY_FOLDER_MAP[quality_key]
+    async def on_timeout(self) -> None:
+        for child in self.children:
+            child.disabled = True
+        try:
+            await self.original_interaction.edit_original_response(
+                content=TRANSLATIONS[self.language]["timeout_msg"], view=None
+            )
+        except Exception:
+            pass
 
-        chosen_file_name: str | None = None
-        cookie_content:   str | None = None
-        tmp_path:         str | None = None
 
-        if COOKIES_GITHUB_REPO and COOKIES_GITHUB_PATH is not None:
-            base_path    = (COOKIES_GITHUB_PATH.rstrip("/") + "/" + quality_folder) if COOKIES_GITHUB_PATH else quality_folder
-            github_names = await asyncio.to_thread(_fetch_github_cookie_list_in_path, base_path)
-            if github_names:
-                chosen_file_name = await asyncio.to_thread(pick_github_cookie_rotation, github_names)
-                cookie_content   = await asyncio.to_thread(
-                    _fetch_github_cookie_content_in_path, base_path, chosen_file_name
+class DeviceSelectView(discord.ui.View):
+    def __init__(
+        self,
+        original_user: discord.User | discord.Member,
+        original_interaction: discord.Interaction,
+        language: str,
+        quality: str,
+        lang_message: discord.Message | None = None,
+        confirm_message: discord.Message | None = None,
+    ) -> None:
+        super().__init__(timeout=60)
+        self.original_user        = original_user
+        self.original_interaction = original_interaction
+        self.language             = language
+        self.quality              = quality
+        self.lang_message         = lang_message
+        self.confirm_message      = confirm_message
+
+        for key, label, style, emoji in [
+            ("pc",    TRANSLATIONS[language]["pc_label"],    discord.ButtonStyle.primary,  "🖥️"),
+            ("phone", TRANSLATIONS[language]["phone_label"], discord.ButtonStyle.success,  "📱"),
+            ("tv",    TRANSLATIONS[language]["tv_label"],    discord.ButtonStyle.secondary, "📺"),
+        ]:
+            btn          = discord.ui.Button(label=label, style=style, emoji=emoji)
+            btn.callback = self._make_device_callback(key)
+            self.add_item(btn)
+
+    def _make_device_callback(self, device_key: str):
+        async def callback(interaction: discord.Interaction) -> None:
+            if interaction.user.id != self.original_user.id:
+                await interaction.response.send_message(
+                    TRANSLATIONS[self.language]["not_for_you"], ephemeral=True
                 )
-                if cookie_content is None:
-                    chosen_file_name = None
-
-        if cookie_content is None:
-            local_dir = COOKIES_FOLDER / quality_folder
-            if not local_dir.exists():
-                local_dir = COOKIES_FOLDER
-            if not local_dir.exists():
-                await interaction.edit_original_response(content=t["no_cookies_folder"])
-                await log_user_activity(interaction, "Error", "Cookies folder missing", language=lang)
                 return
-            txt_files = list(local_dir.glob("*.txt"))
-            if not txt_files:
-                await interaction.edit_original_response(content=t["no_cookie_files"])
-                await log_user_activity(interaction, "Error", "No cookie files", language=lang)
-                return
-            chosen_path      = pick_cookie_file(txt_files)
-            chosen_file_name = chosen_path.name
-            try:
-                cookie_content = chosen_path.read_text(encoding="utf-8")
-            except Exception as exc:
-                log.error(f"❌ Failed to read local cookie: {exc}")
-                await interaction.edit_original_response(content=t["unexpected_error"])
-                return
-
-        try:
-            with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False, encoding="utf-8") as tmp:
-                tmp.write(cookie_content)
-                tmp_path = tmp.name
-        except Exception as exc:
-            log.error(f"❌ Failed to write temp cookie file: {exc}")
-            await interaction.edit_original_response(content=t["unexpected_error"])
-            return
-
-        try:
-            result = await asyncio.wait_for(
-                asyncio.to_thread(check_cookie_file, tmp_path),
-                timeout=SCRIPT_TIMEOUT,
+            for child in self.children:
+                child.disabled = True
+            await interaction.response.edit_message(
+                content=TRANSLATIONS[self.language]["progress"], view=None
             )
-        except asyncio.TimeoutError:
-            await interaction.edit_original_response(content=t["timeout"])
-            await log_user_activity(interaction, "Timeout", "Validation timeout",
-                                    used_txt_files=[chosen_file_name], language=lang, quality=quality_key)
-            return
-        except Exception as exc:
-            log.error(f"❌ Checker error: {exc}")
-            await interaction.edit_original_response(content=t["unexpected_error"])
-            await log_user_activity(interaction, "Error", f"Exception: {str(exc)[:80]}",
-                                    used_txt_files=[chosen_file_name], language=lang, quality=quality_key)
-            return
-        finally:
-            if tmp_path:
-                try:
-                    os.unlink(tmp_path)
-                except Exception:
-                    pass
-
-        if result:
-            embed = discord.Embed(
-                title=t["success_title"],
-                description=t["success_desc"].format(link=result),
-                color=NETFLIX_RED,
-                timestamp=datetime.now(),
+            await _generate_and_send_link(
+                interaction,
+                self.language,
+                self.quality,
+                device_key,
+                self.lang_message,
+                self.confirm_message,
             )
-            embed.set_thumbnail(url=NETFLIX_LOGO)
-            embed.set_footer(text=t["footer"] + "  •  X2 Salah Utility 🎬")
-            await interaction.edit_original_response(content=None, embed=embed)
-            tv_message = await interaction.followup.send(t["tv_instruction"], ephemeral=True)
-
-            channel         = interaction.channel
-            command_message = None
-            try:
-                async for msg in channel.history(limit=10):
-                    if (msg.author == interaction.client.user
-                            and msg.interaction_metadata
-                            and msg.interaction_metadata.id == interaction.id):
-                        command_message = msg
-                        break
-            except Exception:
-                pass
-
-            original_response = await interaction.original_response()
-            asyncio.create_task(cleanup_messages(
-                channel=channel,
-                command_message=command_message,
-                original_response=original_response,
-                followup_message=tv_message,
-                lang_message=self.lang_message,
-                confirm_message=self.confirm_message,
-                delay_seconds=CLEANUP_DELAY_SECONDS,
-            ))
-            await log_user_activity(interaction, "✅ Success", "Link generated",
-                                    used_txt_files=[chosen_file_name], language=lang, quality=quality_key)
-        else:
-            retry_view = RetryView(interaction, lang)
-            await interaction.edit_original_response(
-                content=TRANSLATIONS["en"]["retry_prompt"],
-                view=retry_view,
-            )
-            await log_user_activity(interaction, "❌ Failed", "Cookie invalid",
-                                    used_txt_files=[chosen_file_name], language=lang, quality=quality_key)
+            self.stop()
+        return callback
 
     async def on_timeout(self) -> None:
         for child in self.children:
@@ -1542,7 +1831,7 @@ async def cleanup_messages(
     log.info("🧹 Cleanup complete.")
 
 
-@bot.tree.command(name="create", description="🎬 Generate a Netflix PC login link from a random cookie file")
+@bot.tree.command(name="create", description="🎬 Generate a Netflix login link (PC, Phone, or TV)")
 async def create(interaction: discord.Interaction) -> None:
     user_lang = get_user_lang(interaction)
 
@@ -1590,7 +1879,16 @@ async def create(interaction: discord.Interaction) -> None:
 )
 @app_commands.describe(channel="The text channel to designate as the bot's working channel")
 async def set_channel(interaction: discord.Interaction, channel: discord.TextChannel) -> None:
+    # #region agent log
+    _cmd_t0 = time.monotonic()
+    _agent_debug_log("bot.py:set_channel:entry", "set_channel invoked", {"interaction_id": interaction.id, "response_is_done": interaction.response.is_done()}, "B")
+    # #endregion
     lang = get_user_lang(interaction)
+
+    await interaction.response.defer(ephemeral=True)
+    # #region agent log
+    _agent_debug_log("bot.py:set_channel:post_defer", "interaction deferred", {"interaction_id": interaction.id, "elapsed_ms": round((time.monotonic() - _cmd_t0) * 1000), "response_is_done": interaction.response.is_done()}, "A")
+    # #endregion
 
     guild_id   = interaction.guild.id
     guild_name = interaction.guild.name if interaction.guild else "Unknown"
@@ -1601,7 +1899,20 @@ async def set_channel(interaction: discord.Interaction, channel: discord.TextCha
         if lang == "en"
         else f"\u200f✅ البوت سيعمل الآن **فقط** في {channel.mention}."
     )
-    await interaction.response.send_message(msg, ephemeral=True)
+    # #region agent log
+    _elapsed_ms = round((time.monotonic() - _cmd_t0) * 1000)
+    _agent_debug_log("bot.py:set_channel:pre_followup", "about to followup.send", {"interaction_id": interaction.id, "elapsed_ms": _elapsed_ms, "response_is_done": interaction.response.is_done()}, "A")
+    # #endregion
+    try:
+        await interaction.followup.send(msg, ephemeral=True)
+        # #region agent log
+        _agent_debug_log("bot.py:set_channel:post_followup", "followup.send succeeded", {"interaction_id": interaction.id, "elapsed_ms": round((time.monotonic() - _cmd_t0) * 1000)}, "A")
+        # #endregion
+    except discord.NotFound as exc:
+        # #region agent log
+        _agent_debug_log("bot.py:set_channel:followup_failed", "followup.send NotFound", {"interaction_id": interaction.id, "elapsed_ms": round((time.monotonic() - _cmd_t0) * 1000), "error": str(exc), "response_is_done": interaction.response.is_done()}, "A")
+        # #endregion
+        raise
 
     await send_or_update_setup_messages(channel, guild_id)
 
