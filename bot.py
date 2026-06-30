@@ -1118,21 +1118,46 @@ async def _build_stats_embed() -> discord.Embed:
     return embed
 
 
+async def _fetch_or_scan(
+    channel: discord.TextChannel,
+    msg_id: int | None,
+    title_prefix: str,
+) -> "discord.Message | None":
+    """Try to fetch a message by ID; if not found, scan channel history for a
+    bot-authored embed whose title starts with *title_prefix*."""
+    if msg_id:
+        try:
+            return await channel.fetch_message(msg_id)
+        except discord.NotFound:
+            log.info(f"✏️ Tracked message {msg_id} gone – scanning history for '{title_prefix}'")
+        except Exception as exc:
+            log.warning(f"⚠️ fetch_message({msg_id}) failed: {exc}")
+
+    try:
+        async for msg in channel.history(limit=50):
+            if msg.author != bot.user:
+                continue
+            if msg.embeds and msg.embeds[0].title and msg.embeds[0].title.startswith(title_prefix):
+                log.info(f"🔍 Found existing '{title_prefix}' message {msg.id} via history scan")
+                return msg
+    except Exception as exc:
+        log.warning(f"⚠️ History scan failed: {exc}")
+
+    return None
+
+
 async def send_or_update_setup_messages(channel: discord.TextChannel, guild_id: int) -> None:
-    stored = _setup_message_ids.get(guild_id, {})
+    stored        = _setup_message_ids.get(guild_id, {})
     welcome_embed = _build_welcome_embed()
     rules_embed   = _build_rules_embed()
+    stats_embed   = await _build_stats_embed()
 
-    welcome_msg_id = stored.get("welcome")
-    welcome_msg: discord.Message | None = None
-
-    if welcome_msg_id:
+    # ── Welcome message ──────────────────────────────────────────────────────
+    welcome_msg = await _fetch_or_scan(channel, stored.get("welcome"), "🎬 Netflix Link Generator")
+    if welcome_msg:
         try:
-            welcome_msg = await channel.fetch_message(welcome_msg_id)
             await welcome_msg.edit(embed=welcome_embed)
-            log.info(f"✏️ Updated existing welcome message {welcome_msg_id}")
-        except discord.NotFound:
-            welcome_msg = None
+            log.info(f"✏️ Updated welcome message {welcome_msg.id}")
         except Exception as exc:
             log.warning(f"⚠️ Could not update welcome message: {exc}")
             welcome_msg = None
@@ -1149,16 +1174,12 @@ async def send_or_update_setup_messages(channel: discord.TextChannel, guild_id: 
             log.error(f"❌ Failed to send welcome message: {exc}")
             return
 
-    rules_msg_id = stored.get("rules")
-    rules_msg: discord.Message | None = None
-
-    if rules_msg_id:
+    # ── Rules message ────────────────────────────────────────────────────────
+    rules_msg = await _fetch_or_scan(channel, stored.get("rules"), "📜 Rules & Guidelines")
+    if rules_msg:
         try:
-            rules_msg = await channel.fetch_message(rules_msg_id)
             await rules_msg.edit(embed=rules_embed)
-            log.info(f"✏️ Updated existing rules message {rules_msg_id}")
-        except discord.NotFound:
-            rules_msg = None
+            log.info(f"✏️ Updated rules message {rules_msg.id}")
         except Exception as exc:
             log.warning(f"⚠️ Could not update rules message: {exc}")
             rules_msg = None
@@ -1171,18 +1192,12 @@ async def send_or_update_setup_messages(channel: discord.TextChannel, guild_id: 
         except Exception as exc:
             log.error(f"❌ Failed to send rules message: {exc}")
 
-    # ── Stats message ────────────────────────────────────────────────────
-    stats_embed  = await _build_stats_embed()
-    stats_msg_id = stored.get("stats")
-    stats_msg: discord.Message | None = None
-
-    if stats_msg_id:
+    # ── Stats / stock message ────────────────────────────────────────────────
+    stats_msg = await _fetch_or_scan(channel, stored.get("stats"), "📊 Account Stock")
+    if stats_msg:
         try:
-            stats_msg = await channel.fetch_message(stats_msg_id)
             await stats_msg.edit(embed=stats_embed)
-            log.info(f"✏️ Updated existing stats message {stats_msg_id}")
-        except discord.NotFound:
-            stats_msg = None
+            log.info(f"✏️ Updated stats message {stats_msg.id}")
         except Exception as exc:
             log.warning(f"⚠️ Could not update stats message: {exc}")
             stats_msg = None
@@ -1190,6 +1205,10 @@ async def send_or_update_setup_messages(channel: discord.TextChannel, guild_id: 
     if stats_msg is None:
         try:
             stats_msg = await channel.send(embed=stats_embed)
+            try:
+                await stats_msg.pin()
+            except Exception:
+                pass  # pinning is best-effort
             log.info(f"📊 Sent stats message {stats_msg.id} in #{channel.name}")
         except Exception as exc:
             log.error(f"❌ Failed to send stats message: {exc}")
@@ -1413,32 +1432,66 @@ async def _delete_failed_cookie(quality_folder: str, filename: str) -> None:
 
 
 async def _refresh_stats_message(guild_id: int) -> None:
-    """Rebuild and push the stats embed for a guild's configured channel."""
+    """Rebuild and edit-in-place the stats embed for a guild's configured channel.
+
+    Edit order:
+    1. Try the tracked message ID.
+    2. If that message is gone (NotFound), scan the last 50 channel messages
+       for a bot-authored embed whose title starts with "📊 Account Stock"
+       and edit that instead – updating the tracker so future refreshes are
+       instant.
+    3. Only when no existing message can be found at all, send a new one
+       (and pin it, consistent with the welcome / rules messages).
+    """
     channel_id = config.get_channel_for_guild(guild_id)
     if not channel_id:
         return
     channel = bot.get_channel(channel_id)
     if not channel:
         return
+
     stored       = _setup_message_ids.get(guild_id, {})
     stats_msg_id = stored.get("stats")
     stats_embed  = await _build_stats_embed()
+
+    # ── Step 1: edit the tracked message ────────────────────────────────────
     if stats_msg_id:
         try:
             stats_msg = await channel.fetch_message(stats_msg_id)
             await stats_msg.edit(embed=stats_embed)
-            log.info(f"📊 Refreshed stats message for guild {guild_id}")
+            log.info(f"📊 Refreshed stats message {stats_msg_id} for guild {guild_id}")
             return
         except discord.NotFound:
-            pass
+            log.info(f"📊 Tracked stats message {stats_msg_id} gone – scanning history")
+            _setup_message_ids.setdefault(guild_id, {})["stats"] = None
         except Exception as exc:
             log.warning(f"⚠️ Could not refresh stats message: {exc}")
-    # If message is gone, send a new one and track it
+            return  # transient error; don't spam a new message
+
+    # ── Step 2: scan channel history for an existing stats embed ────────────
+    try:
+        async for msg in channel.history(limit=50):
+            if msg.author != bot.user:
+                continue
+            if msg.embeds and msg.embeds[0].title and msg.embeds[0].title.startswith("📊 Account Stock"):
+                await msg.edit(embed=stats_embed)
+                _setup_message_ids.setdefault(guild_id, {})["stats"] = msg.id
+                _save_setup_tracker()
+                log.info(f"📊 Found and refreshed existing stats message {msg.id} in guild {guild_id}")
+                return
+    except Exception as exc:
+        log.warning(f"⚠️ History scan failed for guild {guild_id}: {exc}")
+
+    # ── Step 3: no existing message found – send a new one and pin it ───────
     try:
         new_msg = await channel.send(embed=stats_embed)
+        try:
+            await new_msg.pin()
+        except Exception:
+            pass  # pinning is best-effort
         _setup_message_ids.setdefault(guild_id, {})["stats"] = new_msg.id
         _save_setup_tracker()
-        log.info(f"📊 Re-sent stats message for guild {guild_id}")
+        log.info(f"📊 Re-sent and pinned stats message {new_msg.id} for guild {guild_id}")
     except Exception as exc:
         log.error(f"❌ Failed to re-send stats message: {exc}")
 
@@ -2240,6 +2293,36 @@ async def admin_list(interaction: discord.Interaction) -> None:
 bot.tree.add_command(admin_group)
 
 
+@bot.tree.command(
+    name="stock",
+    description="📊 Refresh the Account Stock embed in the bot channel (Admin only)",
+)
+async def stock_refresh(interaction: discord.Interaction) -> None:
+    """Force-refresh the 📊 Account Stock message by editing it in-place."""
+    lang = get_user_lang(interaction)
+    if not is_admin(interaction.user.id) and not (
+        interaction.guild and interaction.user.guild_permissions.administrator
+    ):
+        await interaction.response.send_message(TRANSLATIONS[lang]["not_admin"], ephemeral=True)
+        return
+
+    guild_id = interaction.guild.id if interaction.guild else None
+    if not guild_id:
+        await interaction.response.send_message("❌ This command must be used in a server.", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+    await _refresh_stats_message(guild_id)
+
+    msg = (
+        "✅ Account Stock message has been refreshed."
+        if lang == "en"
+        else "\u200f✅ تم تحديث رسالة مخزون الحسابات."
+    )
+    await interaction.followup.send(msg, ephemeral=True)
+    log.info(f"📊 /stock used by {interaction.user} in guild {guild_id}")
+
+
 @bot.event
 async def on_ready() -> None:
     log.info("━" * 60)
@@ -2297,6 +2380,18 @@ async def on_ready() -> None:
             log.info(f"✅ Synced {len(synced)} command(s) globally")
         except Exception as exc:
             log.error(f"❌ Failed to sync global commands: {exc}")
+
+    # ── Refresh the stock embed in every configured channel on startup ───────
+    # This keeps the count accurate even after a restart during which cookies
+    # may have been added or removed.
+    guilds_to_refresh = ALLOWED_GUILD_IDS if ALLOWED_GUILD_IDS else [g.id for g in bot.guilds]
+    for _gid in guilds_to_refresh:
+        _ch_id = config.get_channel_for_guild(_gid)
+        if _ch_id:
+            try:
+                await _refresh_stats_message(_gid)
+            except Exception as _exc:
+                log.warning(f"⚠️ Startup stats refresh failed for guild {_gid}: {_exc}")
 
 
 if __name__ == "__main__":
