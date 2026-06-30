@@ -690,13 +690,17 @@ def _build_info_dict(info, is_subscribed):
     else:
         profiles_str = "None"
 
+    # --- FIX: sanitize max_streams ---
+    max_streams_val = _int_or_none(info.get("maxStreams"))
+    max_streams_str = str(max_streams_val) if max_streams_val is not None else "N/A"
+
     return {
         "name": decode_netflix_value(info.get("accountOwnerName")) or "N/A",
         "email": decode_netflix_value(info.get("email")) or "N/A",
         "country": country_name,
         "plan": plan_name or "N/A",
         "plan_price": decode_netflix_value(info.get("planPrice")) or "N/A",
-        "max_streams": decode_netflix_value(info.get("maxStreams")) or "N/A",
+        "max_streams": max_streams_str,   # <-- changed line
         "member_since": member_since or "N/A",
         "next_billing": next_billing or "N/A",
         "quality": decode_netflix_value(info.get("videoQuality")) or "N/A",
