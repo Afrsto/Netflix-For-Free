@@ -11,7 +11,6 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 from urllib.parse import urlparse
 
-
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -25,33 +24,18 @@ except ImportError:
 
 from netflix_checker import check_cookie_file
 
-
 COOKIES_FOLDER        = Path("cookies")
 SCRIPT_TIMEOUT        = 30
 CONFIG_FILE           = Path("config.json")
 USER_LOG_FILE         = Path("users.txt")
 CLEANUP_DELAY_SECONDS = 60
-
 EGYPT_TZ = ZoneInfo("Africa/Cairo")
-
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 log = logging.getLogger("NetflixBot")
-
-# #region agent log
-def _agent_debug_log(location: str, message: str, data: dict, hypothesis_id: str) -> None:
-    try:
-        import json as _json
-        _payload = {"sessionId": "6fa734", "location": location, "message": message, "data": data, "timestamp": int(time.time() * 1000), "hypothesisId": hypothesis_id}
-        with open(Path(__file__).resolve().parent / "debug-6fa734.log", "a", encoding="utf-8") as _f:
-            _f.write(_json.dumps(_payload) + "\n")
-    except Exception:
-        pass
-# #endregion
-
 
 DISCORD_BOT_TOKEN = os.environ.get("DISCORD_TOKEN", "").strip()
 GITHUB_TOKEN      = os.environ.get("GITHUB_TOKEN", "").strip()
@@ -78,7 +62,6 @@ DEFAULT_CHANNEL_ID: int | None = int(_default_ch) if _default_ch.isdigit() else 
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
 
-
 def _parse_github_blob_url(url: str) -> tuple[str | None, str | None]:
     if not url:
         return None, None
@@ -94,7 +77,6 @@ def _parse_github_blob_url(url: str) -> tuple[str | None, str | None]:
         if bi + 2 < len(parts):
             return repo, "/".join(parts[bi + 2:])
     return repo, None
-
 
 def _parse_github_tree_url(url: str) -> tuple[str | None, str | None, str]:
     if not url:
@@ -115,7 +97,6 @@ def _parse_github_tree_url(url: str) -> tuple[str | None, str | None, str]:
         if ti + 2 < len(parts):
             path = "/".join(parts[ti + 2:])
     return repo, path, branch
-
 
 REMOTE_LOG_URL  = os.environ.get("REMOTE_LOG_URL", "").strip() or None
 CHANNEL_LOG_URL = os.environ.get("CHANNEL_LOG_URL", "").strip() or None
@@ -157,12 +138,10 @@ if COOKIES_GITHUB_REPO:
 else:
     log.warning("⚠️ COOKIES_REPO_URL not set – using local cookies folder")
 
-
 def _gh_client():
     if not GITHUB_TOKEN:
         return None
     return Github(GITHUB_TOKEN)
-
 
 def _get_repo(repo_name: str | None):
     if not repo_name:
@@ -175,7 +154,6 @@ def _get_repo(repo_name: str | None):
     except GithubException as exc:
         log.error(f"❌ Cannot access GitHub repo {repo_name}: {exc}")
         return None
-
 
 def _read_github_file(repo_name: str | None, file_path: str | None) -> tuple[str, str | None]:
     if not repo_name or not file_path:
@@ -192,7 +170,6 @@ def _read_github_file(repo_name: str | None, file_path: str | None) -> tuple[str
             return "", None
         log.error(f"❌ Failed to read {repo_name}/{file_path}: {exc}")
         return "", None
-
 
 def _write_github_file(
     repo_name: str | None,
@@ -244,7 +221,6 @@ def _write_github_file(
             return False
 
     return False
-
 
 LOCALE_TO_COUNTRY: dict[str, str] = {
     "ar": "Arab Region", "ar-AE": "UAE", "ar-BH": "Bahrain",
@@ -334,7 +310,6 @@ LOCALE_TO_TZ: dict[str, str] = {
     "uk-UA": "Europe/Kiev",
 }
 
-
 def get_locale_info(locale_str: str) -> tuple[str, str, str]:
     locale  = str(locale_str)
     country = LOCALE_TO_COUNTRY.get(locale) or LOCALE_TO_COUNTRY.get(locale.split("-")[0], "Unknown")
@@ -351,9 +326,7 @@ def get_locale_info(locale_str: str) -> tuple[str, str, str]:
         tz_key         = "Unknown"
     return country, local_time_str, tz_key
 
-
 _admin_registry: dict[int, dict] = {}
-
 
 def load_admins_from_github() -> dict[int, dict]:
     raw, _ = _read_github_file(ADMIN_USERS_GITHUB_REPO, ADMIN_USERS_GITHUB_PATH)
@@ -377,7 +350,6 @@ def load_admins_from_github() -> dict[int, dict]:
     log.info(f"👮 Loaded {len(registry)} admin(s) from GitHub")
     return registry
 
-
 def _serialize_admins(registry: dict[int, dict]) -> str:
     lines = ["# Admin users – managed automatically by the bot", ""]
     for uid, info in registry.items():
@@ -386,7 +358,6 @@ def _serialize_admins(registry: dict[int, dict]) -> str:
             f"| added_by={info['added_by']} | added_at={info['added_at']}"
         )
     return "\n".join(lines) + "\n"
-
 
 def save_admins_to_github(registry: dict[int, dict]) -> bool:
     content = _serialize_admins(registry)
@@ -398,24 +369,19 @@ def save_admins_to_github(registry: dict[int, dict]) -> bool:
         f"👮 Update admin list [{now_str} EGY]",
     )
 
-
 BOT_OWNER_ID:   int = 994817247061225633
 BOT_COADMIN_ID: int = 1138625081942233273
 
 _PRIVILEGED_IDS: frozenset[int] = frozenset({BOT_OWNER_ID, BOT_COADMIN_ID})
 
-
 def is_admin(user_id: int) -> bool:
     return user_id in _PRIVILEGED_IDS or user_id in _admin_registry
-
 
 def is_owner(user_id: int) -> bool:
     return user_id == BOT_OWNER_ID
 
-
 _banned_user_ids:   set[int]      = set()
 _ban_attempt_counts: dict[int, int] = {}
-
 
 def load_banned_users_from_github() -> set[int]:
     if not BAN_USERS_GITHUB_REPO or not BAN_USERS_GITHUB_PATH:
@@ -434,7 +400,6 @@ def load_banned_users_from_github() -> set[int]:
     log.info(f"🚫 Loaded {len(banned)} banned user(s)")
     return banned
 
-
 def _write_ban_list(lines: list[str]) -> bool:
     content = "\n".join(lines) + ("\n" if lines else "")
     now_str = datetime.now(EGYPT_TZ).strftime("%Y-%m-%d %H:%M")
@@ -444,7 +409,6 @@ def _write_ban_list(lines: list[str]) -> bool:
         content,
         f"🚫 Update ban list [{now_str} EGY]",
     )
-
 
 def add_ban_to_github(user_id: int, username: str) -> bool:
     if not BAN_USERS_GITHUB_REPO or not BAN_USERS_GITHUB_PATH:
@@ -463,7 +427,6 @@ def add_ban_to_github(user_id: int, username: str) -> bool:
     now_str = datetime.now(EGYPT_TZ).strftime("%Y-%m-%d %H:%M:%S")
     lines.append(f"{user_id} | username={username} | banned_at={now_str} | attempts=0")
     return _write_ban_list(lines)
-
 
 def remove_ban_from_github(user_id: int) -> bool:
     if not BAN_USERS_GITHUB_REPO or not BAN_USERS_GITHUB_PATH:
@@ -485,7 +448,6 @@ def remove_ban_from_github(user_id: int) -> bool:
     if not removed:
         return True
     return _write_ban_list(new_lines)
-
 
 def update_ban_attempts_on_github(user_id: int, attempts: int) -> None:
     if not BAN_USERS_GITHUB_REPO or not BAN_USERS_GITHUB_PATH:
@@ -511,13 +473,10 @@ def update_ban_attempts_on_github(user_id: int, attempts: int) -> None:
     if updated:
         _write_ban_list(new_lines)
 
-
 def is_user_banned(user_id: int) -> bool:
     return user_id in _banned_user_ids
 
-
 _banned_guild_ids: set[int] = set()
-
 
 def load_banned_servers_from_github() -> set[int]:
     if not BAN_SERVERS_GITHUB_REPO or not BAN_SERVERS_GITHUB_PATH:
@@ -536,7 +495,6 @@ def load_banned_servers_from_github() -> set[int]:
     log.info(f"🚫 Loaded {len(banned)} banned server(s)")
     return banned
 
-
 def _write_server_ban_list(lines: list[str]) -> bool:
     content = "\n".join(lines) + ("\n" if lines else "")
     now_str = datetime.now(EGYPT_TZ).strftime("%Y-%m-%d %H:%M")
@@ -546,7 +504,6 @@ def _write_server_ban_list(lines: list[str]) -> bool:
         content,
         f"🚫 Update server ban list [{now_str} EGY]",
     )
-
 
 def add_server_ban_to_github(guild_id: int, guild_name: str, reason: str) -> bool:
     if not BAN_SERVERS_GITHUB_REPO or not BAN_SERVERS_GITHUB_PATH:
@@ -569,7 +526,6 @@ def add_server_ban_to_github(guild_id: int, guild_name: str, reason: str) -> boo
     )
     return _write_server_ban_list(lines)
 
-
 def remove_server_ban_from_github(guild_id: int) -> bool:
     if not BAN_SERVERS_GITHUB_REPO or not BAN_SERVERS_GITHUB_PATH:
         return False
@@ -591,10 +547,8 @@ def remove_server_ban_from_github(guild_id: int) -> bool:
         return True
     return _write_server_ban_list(new_lines)
 
-
 def is_server_banned(guild_id: int) -> bool:
     return guild_id in _banned_guild_ids
-
 
 def record_ban_attempt(user_id: int) -> int:
     _ban_attempt_counts[user_id] = _ban_attempt_counts.get(user_id, 0) + 1
@@ -605,7 +559,6 @@ def record_ban_attempt(user_id: int) -> int:
     except RuntimeError:
         pass
     return count
-
 
 def update_users_txt_on_github(new_line: str) -> bool:
     if not GITHUB_REPO or not GITHUB_FILE_PATH:
@@ -625,22 +578,9 @@ def update_users_txt_on_github(new_line: str) -> bool:
         f"📝 Log entry [{now_str} EGY]",
     )
 
-
 COOLDOWN_HOURS = 24
 
-
 def check_user_cooldown(user_id: int) -> tuple[bool, float]:
-    """
-    Check if the user is within the 24-hour cooldown period.
-
-    Returns:
-        (is_on_cooldown: bool, remaining_hours: float)
-        If not on cooldown → (False, 0.0)
-        If on cooldown    → (True,  hours_remaining)
-
-    Only ✅ Success entries count; failed/error attempts are ignored.
-    Admins are always exempt.
-    """
     if is_admin(user_id):
         return False, 0.0
 
@@ -655,15 +595,12 @@ def check_user_cooldown(user_id: int) -> tuple[bool, float]:
     last_success_dt: datetime | None = None
 
     for line in raw.splitlines():
-        # Only care about successful generations for this user
         if f"🆔 ID: {user_id_str}" not in line:
             continue
         if "📊 Status: ✅ Success" not in line:
             continue
-        # Parse timestamp: "[2026-05-26 19:52:07 EGY]"
         try:
             ts_part = line.split("]")[0].lstrip("[").strip()
-            # Remove trailing timezone label (e.g. " EGY")
             ts_clean = " ".join(ts_part.split()[:2])
             entry_dt = datetime.strptime(ts_clean, "%Y-%m-%d %H:%M:%S").replace(
                 tzinfo=EGYPT_TZ
@@ -685,7 +622,6 @@ def check_user_cooldown(user_id: int) -> tuple[bool, float]:
 
     return False, 0.0
 
-
 def save_channel_link_to_github(guild_id: int, guild_name: str, channel_id: int, channel_name: str) -> None:
     if not CHANNEL_LOG_GITHUB_REPO or not CHANNEL_LOG_GITHUB_PATH:
         return
@@ -705,7 +641,6 @@ def save_channel_link_to_github(guild_id: int, guild_name: str, channel_id: int,
         f"📌 Update channel link: guild {guild_id} → channel {channel_id}",
     )
 
-
 def load_channel_links_from_github() -> dict[str, int]:
     if not CHANNEL_LOG_GITHUB_REPO or not CHANNEL_LOG_GITHUB_PATH:
         return {}
@@ -723,10 +658,8 @@ def load_channel_links_from_github() -> dict[str, int]:
     log.info(f"📥 Loaded {len(result)} channel link(s) from GitHub logs.txt")
     return result
 
-
 _used_cookie_files:        list[Path] = []
 _used_github_cookie_names: list[str]  = []
-
 
 def pick_cookie_file(txt_files: list[Path]) -> Path:
     global _used_cookie_files
@@ -740,7 +673,6 @@ def pick_cookie_file(txt_files: list[Path]) -> Path:
     _used_cookie_files.append(chosen)
     return chosen
 
-
 def pick_github_cookie_rotation(filenames: list[str]) -> str:
     global _used_github_cookie_names
     _used_github_cookie_names = [f for f in _used_github_cookie_names if f in filenames]
@@ -753,14 +685,9 @@ def pick_github_cookie_rotation(filenames: list[str]) -> str:
     _used_github_cookie_names.append(chosen)
     return chosen
 
-
 _cookies_repo_cache = None
 
-
 def _get_cookies_repo():
-    """Cached lookup of the cookies repo. Only caches on success, so a
-    transient GitHub failure doesn't get "stuck" — the next call still
-    retries the lookup instead of returning None forever."""
     global _cookies_repo_cache
     if _cookies_repo_cache is not None:
         return _cookies_repo_cache
@@ -768,7 +695,6 @@ def _get_cookies_repo():
     if repo is not None:
         _cookies_repo_cache = repo
     return repo
-
 
 def _fetch_github_cookie_list_in_path(folder_path: str) -> list[str]:
     repo = _get_cookies_repo()
@@ -780,7 +706,6 @@ def _fetch_github_cookie_list_in_path(folder_path: str) -> list[str]:
     except GithubException as exc:
         log.error(f"❌ Failed to list GitHub path {folder_path}: {exc}")
         return []
-
 
 def _fetch_github_cookie_content_in_path(folder_path: str, filename: str) -> str | None:
     repo = _get_cookies_repo()
@@ -794,13 +719,11 @@ def _fetch_github_cookie_content_in_path(folder_path: str, filename: str) -> str
         log.error(f"❌ Failed to download {folder_path}/{filename}: {exc}")
         return None
 
-
 QUALITY_FOLDER_MAP: dict[str, str] = {
     "hd":  "Basic",
     "fhd": "Standard",
     "uhd": "Premium",
 }
-
 
 async def log_user_activity(
     interaction: discord.Interaction,
@@ -859,7 +782,6 @@ async def log_user_activity(
         log.error(f"❌ Failed to write local log: {exc}")
 
     await asyncio.to_thread(update_users_txt_on_github, line)
-
 
 TRANSLATIONS: dict[str, dict[str, str]] = {
     "en": {
@@ -946,14 +868,11 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
     },
 }
 
-
 def get_user_lang(interaction: discord.Interaction) -> str:
     return "ar" if str(interaction.locale).startswith("ar") else "en"
 
-
 _setup_message_ids: dict[int, dict[str, int]] = {}
 _SETUP_TRACKER_FILE = Path("setup_messages.json")
-
 
 def _load_setup_tracker() -> None:
     global _setup_message_ids
@@ -965,7 +884,6 @@ def _load_setup_tracker() -> None:
         except Exception as exc:
             log.warning(f"⚠️ Could not load setup tracker: {exc}")
 
-
 def _save_setup_tracker() -> None:
     try:
         with open(_SETUP_TRACKER_FILE, "w") as f:
@@ -973,11 +891,9 @@ def _save_setup_tracker() -> None:
     except Exception as exc:
         log.warning(f"⚠️ Could not save setup tracker: {exc}")
 
-
 NETFLIX_RED = discord.Color.from_rgb(229, 9, 20)
 FOOTER_TEXT = "⚡ X2 Salah Utility  •  Netflix Bot 🎬"
 NETFLIX_LOGO = "https://upload.wikimedia.org/wikipedia/commons/0/08/Netflix_2015_logo.svg"
-
 
 def _build_welcome_embed() -> discord.Embed:
     embed = discord.Embed(
@@ -1034,7 +950,6 @@ def _build_welcome_embed() -> discord.Embed:
     embed.set_footer(text=FOOTER_TEXT)
     return embed
 
-
 def _build_rules_embed() -> discord.Embed:
     embed = discord.Embed(
         title="📜 Rules & Guidelines  |  القواعد والإرشادات",
@@ -1065,10 +980,7 @@ def _build_rules_embed() -> discord.Embed:
     embed.set_footer(text=FOOTER_TEXT)
     return embed
 
-
-
 def _count_txt_files_in_folder(quality_folder: str) -> int:
-    """Count .txt files for a quality tier (local or GitHub)."""
     if COOKIES_GITHUB_REPO and COOKIES_GITHUB_PATH is not None:
         base_path = (COOKIES_GITHUB_PATH.rstrip("/") + "/" + quality_folder) if COOKIES_GITHUB_PATH else quality_folder
         try:
@@ -1076,18 +988,12 @@ def _count_txt_files_in_folder(quality_folder: str) -> int:
             return len(names)
         except Exception:
             pass
-    # Fallback to local
     local_dir = COOKIES_FOLDER / quality_folder
     if not local_dir.exists():
         return 0
     return len(list(local_dir.glob("*.txt")))
 
-
 async def _build_stats_embed() -> discord.Embed:
-    # The three counts are independent, so fetch them concurrently instead
-    # of one after another — and run them in a background thread since
-    # _count_txt_files_in_folder hits the GitHub API synchronously, which
-    # would otherwise block the bot's entire event loop while it waits.
     premium_count, standard_count, basic_count = await asyncio.gather(
         asyncio.to_thread(_count_txt_files_in_folder, "Premium"),
         asyncio.to_thread(_count_txt_files_in_folder, "Standard"),
@@ -1117,14 +1023,11 @@ async def _build_stats_embed() -> discord.Embed:
     embed.set_footer(text=FOOTER_TEXT)
     return embed
 
-
 async def _fetch_or_scan(
     channel: discord.TextChannel,
     msg_id: int | None,
     title_prefix: str,
 ) -> "discord.Message | None":
-    """Try to fetch a message by ID; if not found, scan channel history for a
-    bot-authored embed whose title starts with *title_prefix*."""
     if msg_id:
         try:
             return await channel.fetch_message(msg_id)
@@ -1145,14 +1048,12 @@ async def _fetch_or_scan(
 
     return None
 
-
 async def send_or_update_setup_messages(channel: discord.TextChannel, guild_id: int) -> None:
     stored        = _setup_message_ids.get(guild_id, {})
     welcome_embed = _build_welcome_embed()
     rules_embed   = _build_rules_embed()
     stats_embed   = await _build_stats_embed()
 
-    # ── Welcome message ──────────────────────────────────────────────────────
     welcome_msg = await _fetch_or_scan(channel, stored.get("welcome"), "🎬 Netflix Link Generator")
     if welcome_msg:
         try:
@@ -1174,7 +1075,6 @@ async def send_or_update_setup_messages(channel: discord.TextChannel, guild_id: 
             log.error(f"❌ Failed to send welcome message: {exc}")
             return
 
-    # ── Rules message ────────────────────────────────────────────────────────
     rules_msg = await _fetch_or_scan(channel, stored.get("rules"), "📜 Rules & Guidelines")
     if rules_msg:
         try:
@@ -1192,7 +1092,6 @@ async def send_or_update_setup_messages(channel: discord.TextChannel, guild_id: 
         except Exception as exc:
             log.error(f"❌ Failed to send rules message: {exc}")
 
-    # ── Stats / stock message ────────────────────────────────────────────────
     stats_msg = await _fetch_or_scan(channel, stored.get("stats"), "📊 Account Stock")
     if stats_msg:
         try:
@@ -1208,7 +1107,7 @@ async def send_or_update_setup_messages(channel: discord.TextChannel, guild_id: 
             try:
                 await stats_msg.pin()
             except Exception:
-                pass  # pinning is best-effort
+                pass
             log.info(f"📊 Sent stats message {stats_msg.id} in #{channel.name}")
         except Exception as exc:
             log.error(f"❌ Failed to send stats message: {exc}")
@@ -1219,7 +1118,6 @@ async def send_or_update_setup_messages(channel: discord.TextChannel, guild_id: 
         "stats":   stats_msg.id   if stats_msg   else None,
     }
     _save_setup_tracker()
-
 
 class Config:
     def __init__(self) -> None:
@@ -1305,36 +1203,23 @@ class Config:
         guild_name: str = "Unknown",
         channel_name: str = "Unknown",
     ) -> None:
-        # #region agent log
-        _t0 = time.monotonic()
-        _agent_debug_log("bot.py:set_allowed_channel:entry", "set_allowed_channel started", {"guild_id": guild_id, "channel_id": channel_id}, "A")
-        # #endregion
         guild_key             = str(guild_id)
         self.guilds[guild_key] = channel_id
         self.allowed_channel_id = channel_id
         await self._save_to_db(guild_key, channel_id)
         self._save_to_file()
-        # #region agent log
-        _agent_debug_log("bot.py:set_allowed_channel:pre_github", "local save done, starting GitHub write", {"elapsed_ms": round((time.monotonic() - _t0) * 1000)}, "A")
-        # #endregion
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(
             None, save_channel_link_to_github,
             guild_id, guild_name, channel_id, channel_name,
         )
-        # #region agent log
-        _agent_debug_log("bot.py:set_allowed_channel:post_github", "GitHub write finished", {"elapsed_ms": round((time.monotonic() - _t0) * 1000)}, "A")
-        # #endregion
         log.info(f"✅ Channel set: guild {guild_id} → channel {channel_id}")
 
-
 config = Config()
-
 
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
-
 
 def is_allowed_channel(interaction: discord.Interaction) -> bool:
     guild_id = interaction.guild.id if interaction.guild else None
@@ -1345,14 +1230,12 @@ def is_allowed_channel(interaction: discord.Interaction) -> bool:
         return False
     return interaction.channel_id == channel_id
 
-
 def _guild_allowed(guild_id: int | None) -> bool:
     if not guild_id:
         return False
     if not ALLOWED_GUILD_IDS:
         return True
     return guild_id in ALLOWED_GUILD_IDS
-
 
 async def global_interaction_check(interaction: discord.Interaction) -> bool:
     if is_user_banned(interaction.user.id):
@@ -1398,11 +1281,7 @@ async def global_interaction_check(interaction: discord.Interaction) -> bool:
 
     return True
 
-
-
 async def _delete_failed_cookie(quality_folder: str, filename: str) -> None:
-    """Delete a cookie file that produced a failed result."""
-    # Try GitHub first
     if COOKIES_GITHUB_REPO and COOKIES_GITHUB_PATH is not None:
         base_path = (COOKIES_GITHUB_PATH.rstrip("/") + "/" + quality_folder) if COOKIES_GITHUB_PATH else quality_folder
         file_path = f"{base_path.rstrip('/')}/{filename}"
@@ -1421,7 +1300,6 @@ async def _delete_failed_cookie(quality_folder: str, filename: str) -> None:
         except Exception as exc:
             log.warning(f"⚠️ Could not delete GitHub cookie {file_path}: {exc}")
 
-    # Fallback: delete from local folder
     local_path = COOKIES_FOLDER / quality_folder / filename
     if local_path.exists():
         try:
@@ -1430,19 +1308,7 @@ async def _delete_failed_cookie(quality_folder: str, filename: str) -> None:
         except Exception as exc:
             log.warning(f"⚠️ Could not delete local cookie {local_path}: {exc}")
 
-
 async def _refresh_stats_message(guild_id: int) -> None:
-    """Rebuild and edit-in-place the stats embed for a guild's configured channel.
-
-    Edit order:
-    1. Try the tracked message ID.
-    2. If that message is gone (NotFound), scan the last 50 channel messages
-       for a bot-authored embed whose title starts with "📊 Account Stock"
-       and edit that instead – updating the tracker so future refreshes are
-       instant.
-    3. Only when no existing message can be found at all, send a new one
-       (and pin it, consistent with the welcome / rules messages).
-    """
     channel_id = config.get_channel_for_guild(guild_id)
     if not channel_id:
         return
@@ -1454,7 +1320,6 @@ async def _refresh_stats_message(guild_id: int) -> None:
     stats_msg_id = stored.get("stats")
     stats_embed  = await _build_stats_embed()
 
-    # ── Step 1: edit the tracked message ────────────────────────────────────
     if stats_msg_id:
         try:
             stats_msg = await channel.fetch_message(stats_msg_id)
@@ -1466,9 +1331,8 @@ async def _refresh_stats_message(guild_id: int) -> None:
             _setup_message_ids.setdefault(guild_id, {})["stats"] = None
         except Exception as exc:
             log.warning(f"⚠️ Could not refresh stats message: {exc}")
-            return  # transient error; don't spam a new message
+            return
 
-    # ── Step 2: scan channel history for an existing stats embed ────────────
     try:
         async for msg in channel.history(limit=50):
             if msg.author != bot.user:
@@ -1482,19 +1346,17 @@ async def _refresh_stats_message(guild_id: int) -> None:
     except Exception as exc:
         log.warning(f"⚠️ History scan failed for guild {guild_id}: {exc}")
 
-    # ── Step 3: no existing message found – send a new one and pin it ───────
     try:
         new_msg = await channel.send(embed=stats_embed)
         try:
             await new_msg.pin()
         except Exception:
-            pass  # pinning is best-effort
+            pass
         _setup_message_ids.setdefault(guild_id, {})["stats"] = new_msg.id
         _save_setup_tracker()
         log.info(f"📊 Re-sent and pinned stats message {new_msg.id} for guild {guild_id}")
     except Exception as exc:
         log.error(f"❌ Failed to re-send stats message: {exc}")
-
 
 async def _generate_and_send_link(
     interaction: discord.Interaction,
@@ -1555,7 +1417,7 @@ async def _generate_and_send_link(
         return
 
     try:
-        result = await asyncio.wait_for(
+        link, info = await asyncio.wait_for(
             asyncio.to_thread(check_cookie_file, tmp_path, device),
             timeout=SCRIPT_TIMEOUT,
         )
@@ -1593,80 +1455,69 @@ async def _generate_and_send_link(
     except Exception:
         pass
 
-    if result:
+    if link and info:
         embed = discord.Embed(
             title=t["success_title"],
-            description=t["success_desc"].format(link=result),
             color=NETFLIX_RED,
             timestamp=datetime.now(),
         )
         embed.set_thumbnail(url=NETFLIX_LOGO)
-        embed.set_footer(text=t["footer"] + "  •  X2 Salah Utility 🎬")
-        await interaction.edit_original_response(content=None, embed=embed)
 
-        original_response = await interaction.original_response()
+        field_map = {
+            "👤 Name": info.get("name", "N/A"),
+            "✉️ Email": info.get("email", "N/A"),
+            "🌍 Country": info.get("country", "N/A"),
+            "🎁 Plan": info.get("plan", "N/A"),
+            "💰 Plan Price": info.get("plan_price", "N/A"),
+            "📺 Max Streams": info.get("max_streams", "N/A"),
+            "📅 Member Since": info.get("member_since", "N/A"),
+            "🔄 Next Billing": info.get("next_billing", "N/A"),
+            "📊 Quality": info.get("quality", "N/A"),
+            "💳 Payment": info.get("payment", "N/A"),
+            "🏧 Card": info.get("card", "N/A"),
+            "📱 Phone": info.get("phone", "N/A"),
+            "⏸️ Hold Status": info.get("hold_status", "N/A"),
+            "👥 Extra Members": info.get("extra_members", "N/A"),
+            "✉️ Email Verified": info.get("email_verified", "N/A"),
+            "🎫 Membership": info.get("membership_status", "N/A"),
+            "👤 Profiles": info.get("profiles", "N/A"),
+            "⏳ Expires at": info.get("expires_at", "N/A"),
+        }
+
+        for name, value in field_map.items():
+            if value and value != "N/A":
+                embed.add_field(name=name, value=f"`{value}`", inline=False)
+
+        embed.add_field(
+            name="🔗 Login Link",
+            value=f"Click the link below to log in automatically:\n{link}",
+            inline=False
+        )
+
+        embed.set_footer(text=t["footer"] + "  •  X2 Salah Utility 🎬")
+
+        await interaction.edit_original_response(content=None, embed=embed)
+        first_message = await interaction.original_response()
+
         asyncio.create_task(cleanup_messages(
             channel=channel,
             command_message=command_message,
-            original_response=original_response,
+            original_response=first_message,
             followup_message=None,
             lang_message=lang_message,
             confirm_message=confirm_message,
             delay_seconds=CLEANUP_DELAY_SECONDS,
         ))
+
         await log_user_activity(
             interaction, "✅ Success", "Link generated",
             used_txt_files=[chosen_file_name], language=lang, quality=quality_key, device=device,
         )
-        # Refresh the stock counter shown in the channel
         if interaction.guild:
             asyncio.create_task(_refresh_stats_message(interaction.guild.id))
-    else:
-        retry_view = RetryView(interaction, lang)
-        await interaction.edit_original_response(
-            content=TRANSLATIONS["en"]["retry_prompt"],
-            view=retry_view,
-        )
-
-        # Same 1-minute cleanup as the success path. Previously nothing was
-        # scheduled here, so the language pick, quality/device pick, and the
-        # Retry prompt itself (plus, if the user tapped Retry, the orphaned
-        # "progress" stub left behind once a fresh message chain spawned)
-        # all stayed in the channel forever instead of self-deleting like
-        # every other step in the flow. Message references are captured by
-        # ID, so this still cleans them up correctly even if their content
-        # gets edited again (e.g. by a Retry click) before the delay fires.
-        retry_message = await interaction.original_response()
-        asyncio.create_task(cleanup_messages(
-            channel=channel,
-            command_message=command_message,
-            original_response=retry_message,
-            followup_message=None,
-            lang_message=lang_message,
-            confirm_message=None,
-            delay_seconds=CLEANUP_DELAY_SECONDS,
-        ))
-
-        await log_user_activity(
-            interaction, "❌ Failed", "Cookie invalid",
-            used_txt_files=[chosen_file_name], language=lang, quality=quality_key, device=device,
-        )
-        # Delete the failed cookie file and refresh the stock counter
-        if chosen_file_name and quality_key:
-            quality_folder = QUALITY_FOLDER_MAP.get(quality_key, "")
-            if quality_folder:
-                asyncio.create_task(_delete_failed_cookie(quality_folder, chosen_file_name))
-        if interaction.guild:
-            asyncio.create_task(_refresh_stats_message(interaction.guild.id))
-
 
 class RetryView(discord.ui.View):
-    """Shown to the user after a failed attempt so they can retry without re-running /create."""
-
     def __init__(self, original_interaction: discord.Interaction, language: str) -> None:
-        # Match CLEANUP_DELAY_SECONDS: the message this view is attached to
-        # now gets deleted on that same schedule, so the button shouldn't be
-        # considered "live" any longer than the message actually exists.
         super().__init__(timeout=CLEANUP_DELAY_SECONDS)
         self.original_interaction = original_interaction
         self.language = language
@@ -1683,7 +1534,6 @@ class RetryView(discord.ui.View):
         await interaction.response.edit_message(
             content=TRANSLATIONS[self.language]["progress"], view=None
         )
-        # Re-run the full generation flow via a fresh ConfirmView-like call
         view = LanguageSelectView(interaction)
         await interaction.followup.send(
             TRANSLATIONS["en"]["lang_prompt"], view=view, ephemeral=True
@@ -1699,7 +1549,6 @@ class RetryView(discord.ui.View):
             )
         except Exception:
             pass
-
 
 class LanguageSelectView(discord.ui.View):
     def __init__(self, original_interaction: discord.Interaction) -> None:
@@ -1741,7 +1590,6 @@ class LanguageSelectView(discord.ui.View):
             )
         except Exception:
             pass
-
 
 class ConfirmView(discord.ui.View):
     def __init__(
@@ -1800,7 +1648,6 @@ class ConfirmView(discord.ui.View):
             )
         except Exception:
             pass
-
 
 class DeviceSelectView(discord.ui.View):
     def __init__(
@@ -1862,7 +1709,6 @@ class DeviceSelectView(discord.ui.View):
         except Exception:
             pass
 
-
 async def cleanup_messages(
     channel: discord.TextChannel,
     command_message: discord.Message | None,
@@ -1880,7 +1726,6 @@ async def cleanup_messages(
             except Exception:
                 pass
     log.info("🧹 Cleanup complete.")
-
 
 @bot.tree.command(name="create", description="🎬 Generate a Netflix login link (PC, Phone, or TV)")
 async def create(interaction: discord.Interaction) -> None:
@@ -1901,7 +1746,6 @@ async def create(interaction: discord.Interaction) -> None:
             )
         return
 
-    # ── 24-hour cooldown check ──────────────────────────────────────────────
     on_cooldown, remaining_hours = await asyncio.to_thread(
         check_user_cooldown, interaction.user.id
     )
@@ -1918,11 +1762,9 @@ async def create(interaction: discord.Interaction) -> None:
             f"blocked – {hours_left}h {minutes_left}m remaining"
         )
         return
-    # ───────────────────────────────────────────────────────────────────────
 
     view = LanguageSelectView(interaction)
     await interaction.response.send_message(TRANSLATIONS["en"]["lang_prompt"], view=view, ephemeral=True)
-
 
 @bot.tree.command(
     name="channel",
@@ -1930,16 +1772,8 @@ async def create(interaction: discord.Interaction) -> None:
 )
 @app_commands.describe(channel="The text channel to designate as the bot's working channel")
 async def set_channel(interaction: discord.Interaction, channel: discord.TextChannel) -> None:
-    # #region agent log
-    _cmd_t0 = time.monotonic()
-    _agent_debug_log("bot.py:set_channel:entry", "set_channel invoked", {"interaction_id": interaction.id, "response_is_done": interaction.response.is_done()}, "B")
-    # #endregion
     lang = get_user_lang(interaction)
-
     await interaction.response.defer(ephemeral=True)
-    # #region agent log
-    _agent_debug_log("bot.py:set_channel:post_defer", "interaction deferred", {"interaction_id": interaction.id, "elapsed_ms": round((time.monotonic() - _cmd_t0) * 1000), "response_is_done": interaction.response.is_done()}, "A")
-    # #endregion
 
     guild_id   = interaction.guild.id
     guild_name = interaction.guild.name if interaction.guild else "Unknown"
@@ -1950,25 +1784,10 @@ async def set_channel(interaction: discord.Interaction, channel: discord.TextCha
         if lang == "en"
         else f"\u200f✅ البوت سيعمل الآن **فقط** في {channel.mention}."
     )
-    # #region agent log
-    _elapsed_ms = round((time.monotonic() - _cmd_t0) * 1000)
-    _agent_debug_log("bot.py:set_channel:pre_followup", "about to followup.send", {"interaction_id": interaction.id, "elapsed_ms": _elapsed_ms, "response_is_done": interaction.response.is_done()}, "A")
-    # #endregion
-    try:
-        await interaction.followup.send(msg, ephemeral=True)
-        # #region agent log
-        _agent_debug_log("bot.py:set_channel:post_followup", "followup.send succeeded", {"interaction_id": interaction.id, "elapsed_ms": round((time.monotonic() - _cmd_t0) * 1000)}, "A")
-        # #endregion
-    except discord.NotFound as exc:
-        # #region agent log
-        _agent_debug_log("bot.py:set_channel:followup_failed", "followup.send NotFound", {"interaction_id": interaction.id, "elapsed_ms": round((time.monotonic() - _cmd_t0) * 1000), "error": str(exc), "response_is_done": interaction.response.is_done()}, "A")
-        # #endregion
-        raise
+    await interaction.followup.send(msg, ephemeral=True)
 
     await send_or_update_setup_messages(channel, guild_id)
-
     log.info(f"📌 /channel set by {interaction.user} in guild {guild_id} → #{channel.name}")
-
 
 @bot.tree.command(name="ban", description="🚫 Block a user from using the bot by their Discord ID (Admin only)")
 @app_commands.describe(user_id="The Discord user ID to ban")
@@ -2015,7 +1834,6 @@ async def ban_user(interaction: discord.Interaction, user_id: str) -> None:
         )
     await interaction.followup.send(msg, ephemeral=True)
 
-
 @bot.tree.command(name="unban", description="✅ Remove a bot ban for a user by their Discord ID (Admin only)")
 @app_commands.describe(user_id="The Discord user ID to unban")
 async def unban_user(interaction: discord.Interaction, user_id: str) -> None:
@@ -2053,7 +1871,6 @@ async def unban_user(interaction: discord.Interaction, user_id: str) -> None:
             else f"\u200f⚠️ تم رفع الحظر محليًا لكن **فشل الرفع إلى GitHub**."
         )
     await interaction.followup.send(msg, ephemeral=True)
-
 
 @bot.tree.command(
     name="banserver",
@@ -2109,7 +1926,6 @@ async def ban_server(
         )
     await interaction.followup.send(msg, ephemeral=True)
 
-
 @bot.tree.command(
     name="unbanserver",
     description="✅ Remove a bot ban from a server by its guild ID (Admin only)",
@@ -2154,12 +1970,10 @@ async def unban_server(interaction: discord.Interaction, guild_id: str) -> None:
         )
     await interaction.followup.send(msg, ephemeral=True)
 
-
 admin_group = app_commands.Group(
     name="admin",
     description="👮 Manage bot admins",
 )
-
 
 @admin_group.command(name="add", description="👮 Add a user to the bot admin list")
 @app_commands.describe(user_id="Discord user ID to grant admin access")
@@ -2208,7 +2022,6 @@ async def admin_add(interaction: discord.Interaction, user_id: str) -> None:
     )
     await interaction.followup.send(msg, ephemeral=True)
 
-
 @admin_group.command(name="remove", description="👮 Remove a user from the bot admin list")
 @app_commands.describe(user_id="Discord user ID to revoke admin access")
 async def admin_remove(interaction: discord.Interaction, user_id: str) -> None:
@@ -2249,7 +2062,6 @@ async def admin_remove(interaction: discord.Interaction, user_id: str) -> None:
     )
     await interaction.followup.send(msg, ephemeral=True)
 
-
 @admin_group.command(name="list", description="👮 List all current bot admins")
 async def admin_list(interaction: discord.Interaction) -> None:
     lang = get_user_lang(interaction)
@@ -2289,16 +2101,13 @@ async def admin_list(interaction: discord.Interaction) -> None:
     embed.set_footer(text=FOOTER_TEXT)
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-
 bot.tree.add_command(admin_group)
-
 
 @bot.tree.command(
     name="stock",
     description="📊 Refresh the Account Stock embed in the bot channel (Admin only)",
 )
 async def stock_refresh(interaction: discord.Interaction) -> None:
-    """Force-refresh the 📊 Account Stock message by editing it in-place."""
     lang = get_user_lang(interaction)
     if not is_admin(interaction.user.id) and not (
         interaction.guild and interaction.user.guild_permissions.administrator
@@ -2321,7 +2130,6 @@ async def stock_refresh(interaction: discord.Interaction) -> None:
     )
     await interaction.followup.send(msg, ephemeral=True)
     log.info(f"📊 /stock used by {interaction.user} in guild {guild_id}")
-
 
 @bot.event
 async def on_ready() -> None:
@@ -2381,9 +2189,6 @@ async def on_ready() -> None:
         except Exception as exc:
             log.error(f"❌ Failed to sync global commands: {exc}")
 
-    # ── Refresh the stock embed in every configured channel on startup ───────
-    # This keeps the count accurate even after a restart during which cookies
-    # may have been added or removed.
     guilds_to_refresh = ALLOWED_GUILD_IDS if ALLOWED_GUILD_IDS else [g.id for g in bot.guilds]
     for _gid in guilds_to_refresh:
         _ch_id = config.get_channel_for_guild(_gid)
@@ -2392,7 +2197,6 @@ async def on_ready() -> None:
                 await _refresh_stats_message(_gid)
             except Exception as _exc:
                 log.warning(f"⚠️ Startup stats refresh failed for guild {_gid}: {_exc}")
-
 
 if __name__ == "__main__":
     COOKIES_FOLDER.mkdir(exist_ok=True)
