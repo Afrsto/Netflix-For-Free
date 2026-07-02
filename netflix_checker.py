@@ -5,6 +5,8 @@ import json
 import unicodedata
 from collections import OrderedDict
 from datetime import datetime
+from typing import Optional, Dict, Any, Tuple
+
 from urllib3.exceptions import InsecureRequestWarning
 
 requests.packages.urllib3.disable_warnings(category=InsecureRequestWarning)
@@ -134,11 +136,6 @@ _COUNTRY_CODE_TO_NAME = {
     "UA": "Ukraine",
 }
 
-def country_code_to_name(code: str) -> str:
-    if not code:
-        return "Unknown"
-    return _COUNTRY_CODE_TO_NAME.get(code.upper(), code)
-
 def decode_netflix_value(value):
     if value is None:
         return None
@@ -206,6 +203,11 @@ def format_boolean_label(value):
     if parsed is False:
         return "No"
     return None
+
+def country_code_to_name(code: str) -> str:
+    if not code:
+        return "Unknown"
+    return _COUNTRY_CODE_TO_NAME.get(code.upper(), code)
 
 def format_display_date(value):
     if not value:
@@ -343,6 +345,25 @@ def is_on_hold_account(info):
         return hold_value == "Yes"
     membership_status = normalize_plan_key((info or {}).get("membershipStatus"))
     return any(token in membership_status for token in ("hold", "past_due", "payment_retry", "paused", "suspend"))
+
+def extract_profile_names(response_text):
+    names = []
+    for pattern in [
+        r'"profileName"\s*:\s*"([^"]+)"',
+        r'"profileName"\s*:\s*\{\s*"fieldType"\s*:\s*"String"\s*,\s*"value"\s*:\s*"([^"]+)"',
+    ]:
+        for found in re.findall(pattern, response_text, re.DOTALL):
+            decoded = decode_netflix_value(found)
+            if decoded and decoded not in names:
+                names.append(decoded)
+    for match in re.finditer(r'"__typename"\s*:\s*"Profile"', response_text):
+        snippet = response_text[match.start():match.start() + 1200]
+        name_match = re.search(r'"name"\s*:\s*"([^"]+)"', snippet)
+        if name_match:
+            decoded = decode_netflix_value(name_match.group(1))
+            if decoded and decoded not in names:
+                names.append(decoded)
+    return ", ".join(names) if names else None
 
 def extract_info_from_graphql_payload(response_text):
     try:
@@ -497,25 +518,6 @@ def extract_info(response_text):
             merged[bool_field] = format_boolean_label(merged[bool_field])
     return merged
 
-def extract_profile_names(response_text):
-    names = []
-    for pattern in [
-        r'"profileName"\s*:\s*"([^"]+)"',
-        r'"profileName"\s*:\s*\{\s*"fieldType"\s*:\s*"String"\s*,\s*"value"\s*:\s*"([^"]+)"',
-    ]:
-        for found in re.findall(pattern, response_text, re.DOTALL):
-            decoded = decode_netflix_value(found)
-            if decoded and decoded not in names:
-                names.append(decoded)
-    for match in re.finditer(r'"__typename"\s*:\s*"Profile"', response_text):
-        snippet = response_text[match.start():match.start() + 1200]
-        name_match = re.search(r'"name"\s*:\s*"([^"]+)"', snippet)
-        if name_match:
-            decoded = decode_netflix_value(name_match.group(1))
-            if decoded and decoded not in names:
-                names.append(decoded)
-    return ", ".join(names) if names else None
-
 def get_account_page(session, proxy=None, timeout=20):
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
@@ -624,7 +626,55 @@ def build_login_link(token: str, device: str = "pc") -> str:
     template = LOGIN_LINK_TEMPLATES.get(device, LOGIN_LINK_TEMPLATES["pc"])
     return template.format(token=token)
 
-def check_cookie_file(file_path: str, device: str = "pc") -> tuple[str | None, dict | None]:
+def compute_days_left(next_billing_str: Optional[str]) -> Optional[int]:
+    if not next_billing_str:
+        return None
+    try:
+        dt = datetime.strptime(next_billing_str.split("T")[0], "%Y-%m-%d")
+        delta = dt - datetime.now()
+        return max(0, delta.days)
+    except Exception:
+        return None
+
+def _build_info_dict(info: Dict[str, Any], is_subscribed: bool) -> Dict[str, Any]:
+    plan_key, plan_name = derive_plan_info(info, is_subscribed)
+    member_since = format_member_since(info.get("memberSince"))
+    next_billing = format_display_date(info.get("nextBillingDate"))
+    days_left = compute_days_left(info.get("nextBillingDate"))
+
+    country_code = info.get("countryOfSignup") or ""
+    country_name = country_code_to_name(country_code) if country_code else "Unknown"
+
+    profiles_raw = info.get("profiles")
+    if profiles_raw:
+        profile_list = [p.strip() for p in profiles_raw.split(",") if p.strip()]
+        profiles_str = f"{len(profile_list)}: {', '.join(profile_list)}" if profile_list else "None"
+    else:
+        profiles_str = "None"
+
+    max_streams_val = _int_or_none(info.get("maxStreams"))
+    max_streams_str = str(max_streams_val) if max_streams_val is not None else "N/A"
+
+    return {
+        "name": decode_netflix_value(info.get("accountOwnerName")) or "N/A",
+        "email": decode_netflix_value(info.get("email")) or "N/A",
+        "country": country_name,
+        "plan": plan_name or "N/A",
+        "plan_price": decode_netflix_value(info.get("planPrice")) or "N/A",
+        "max_streams": max_streams_str,
+        "member_since": member_since or "N/A",
+        "next_billing": next_billing or "N/A",
+        "quality": decode_netflix_value(info.get("videoQuality")) or "N/A",
+        "payment": decode_netflix_value(info.get("paymentMethodType")) or "N/A",
+        "card": decode_netflix_value(info.get("maskedCard")) or "N/A",
+        "phone": normalize_phone_number(info.get("phoneNumber")) or "N/A",
+        "days_left": str(days_left) if days_left is not None else "N/A",
+        "membership_status": decode_netflix_value(info.get("membershipStatus")) or "N/A",
+        "profiles": profiles_str,
+        "expires_at": "N/A",
+    }
+
+def check_cookie_file(file_path: str, device: str = "pc") -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
     if device not in LOGIN_DEVICES:
         device = "pc"
 
@@ -670,47 +720,3 @@ def check_cookie_file(file_path: str, device: str = "pc") -> tuple[str | None, d
     else:
         info_dict["expires_at"] = "N/A"
     return link, info_dict
-
-def _build_info_dict(info, is_subscribed):
-    plan_key, plan_name = derive_plan_info(info, is_subscribed)
-    extra_members = "Yes" if is_extra_member_account(info) else "No"
-    hold_status = format_boolean_label(info.get("holdStatus")) or "No"
-    email_verified = format_boolean_label(info.get("emailVerified")) or "No"
-    phone_verified = format_boolean_label(info.get("phoneVerified")) or "No"
-    member_since = format_member_since(info.get("memberSince"))
-    next_billing = format_display_date(info.get("nextBillingDate"))
-
-    country_code = info.get("countryOfSignup") or ""
-    country_name = country_code_to_name(country_code) if country_code else "Unknown"
-
-    profiles_raw = info.get("profiles")
-    if profiles_raw:
-        profile_list = [p.strip() for p in profiles_raw.split(",") if p.strip()]
-        profiles_str = f"{len(profile_list)}: {', '.join(profile_list)}" if profile_list else "None"
-    else:
-        profiles_str = "None"
-
-    # --- FIX: sanitize max_streams ---
-    max_streams_val = _int_or_none(info.get("maxStreams"))
-    max_streams_str = str(max_streams_val) if max_streams_val is not None else "N/A"
-
-    return {
-        "name": decode_netflix_value(info.get("accountOwnerName")) or "N/A",
-        "email": decode_netflix_value(info.get("email")) or "N/A",
-        "country": country_name,
-        "plan": plan_name or "N/A",
-        "plan_price": decode_netflix_value(info.get("planPrice")) or "N/A",
-        "max_streams": max_streams_str,   # <-- changed line
-        "member_since": member_since or "N/A",
-        "next_billing": next_billing or "N/A",
-        "quality": decode_netflix_value(info.get("videoQuality")) or "N/A",
-        "payment": decode_netflix_value(info.get("paymentMethodType")) or "N/A",
-        "card": decode_netflix_value(info.get("maskedCard")) or "N/A",
-        "phone": normalize_phone_number(info.get("phoneNumber")) or "N/A",
-        "hold_status": hold_status,
-        "extra_members": extra_members,
-        "email_verified": email_verified,
-        "membership_status": decode_netflix_value(info.get("membershipStatus")) or "N/A",
-        "profiles": profiles_str,
-        "expires_at": "N/A",
-    }
