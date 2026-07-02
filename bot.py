@@ -107,6 +107,7 @@ def _parse_github_tree_url(url: str) -> Tuple[Optional[str], Optional[str], str]
 REMOTE_LOG_URL = os.environ.get("REMOTE_LOG_URL", "").strip() or None
 CHANNEL_LOG_URL = os.environ.get("CHANNEL_LOG_URL", "").strip() or None
 BAN_USERS_URL = os.environ.get("BAN_USERS_URL", "https://github.com/Afrsto/bot-users/blob/main/ban-users.txt").strip() or None
+NETFLIX_LOG_URL = os.environ.get("BAN_USERS_URL", "https://github.com/Afrsto/bot-users/blob/main/ban-users.txt").strip() or None
 BAN_SERVERS_URL = os.environ.get("BAN_SERVERS_URL", "https://github.com/Afrsto/bot-users/blob/main/ban-servers.txt").strip() or None
 ADMIN_USERS_URL = os.environ.get("ADMIN_USERS_URL", "https://github.com/Afrsto/bot-users/blob/main/admin-users.txt").strip() or None
 COOKIES_REPO_URL = os.environ.get("COOKIES_REPO_URL", "").strip() or None
