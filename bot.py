@@ -563,6 +563,10 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
             "5️⃣  Wait a few seconds for your personal link.\n\n"
             "*⚠️ Note: Links are single-use. Messages auto-delete after 1 minute for privacy.*"
         ),
+        # New error messages (English)
+        "account_inactive": "❌ This account is not currently active or cannot generate a login token. It may be unsubscribed or expired.",
+        "validation_failed": "❌ Could not validate the account. Please try again later.",
+        "failure": "❌ Failure",
     },
     "ar": {
         "lang_prompt": "🌐 **Please select your language:**\n🌐 **الرجاء اختيار اللغة:**",
@@ -604,6 +608,10 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
             "5️⃣  انتظر بضع ثوانٍ للحصول على رابطك الشخصي.\n\n"
             "\u200f*⚠️ ملاحظة: الروابط للاستخدام مرة واحدة. يتم حذف الرسائل تلقائياً بعد دقيقة.*"
         ),
+        # New error messages (Arabic)
+        "account_inactive": "❌ هذا الحساب غير نشط حاليًا أو لا يمكن إنشاء رمز تسجيل الدخول. قد يكون غير مشترك أو منتهي الصلاحية.",
+        "validation_failed": "❌ تعذر التحقق من الحساب. يرجى المحاولة مرة أخرى لاحقًا.",
+        "failure": "❌ فشل",
     }
 }
 
@@ -1759,16 +1767,16 @@ async def _generate_and_send_link(
     else:
         # No link generated – account may be unsubscribed or invalid
         if info:
-            error_msg = (
-                "❌ This account is not currently active or cannot generate a login token. "
-                "It may be unsubscribed or expired."
-            )
+            error_msg = t["account_inactive"]
         else:
-            error_msg = "❌ Could not validate the account. Please try again later."
-        await interaction.edit_original_response(content=error_msg)
+            error_msg = t["validation_failed"]
+        
+        # Create a RetryView with the current interaction and language
+        retry_view = RetryView(interaction, lang)
+        await interaction.edit_original_response(content=error_msg, view=retry_view)
         await log_user_activity(
             interaction,
-            "❌ Failure",
+            t["failure"],
             error_msg,
             used_txt_files=[chosen_file_name],
             language=lang,
