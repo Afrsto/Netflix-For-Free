@@ -1770,7 +1770,12 @@ async def _generate_and_send_link(
             error_msg = t["account_inactive"]
         else:
             error_msg = t["validation_failed"]
-        
+
+        # Delete the problematic cookie file (fire-and-forget)
+        if chosen_file_name:
+            asyncio.create_task(_delete_failed_cookie(quality_folder, chosen_file_name))
+            log.info(f"Scheduled deletion of failed cookie: {quality_folder}/{chosen_file_name}")
+
         # Create a RetryView with the current interaction and language
         retry_view = RetryView(interaction, lang)
         await interaction.edit_original_response(content=error_msg, view=retry_view)
