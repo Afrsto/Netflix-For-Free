@@ -1661,19 +1661,20 @@ async def _generate_and_send_link(
             except Exception:
                 pass
 
-    channel = interaction.channel
-    command_message = None
-    try:
-        async for msg in channel.history(limit=10):
-            if (msg.author == interaction.client.user
-                    and msg.interaction_metadata
-                    and msg.interaction_metadata.id == interaction.id):
-                command_message = msg
-                break
-    except Exception:
-        pass
-
+    # ---- FIX: handle failure to obtain a link ----
     if link and info:
+        channel = interaction.channel
+        command_message = None
+        try:
+            async for msg in channel.history(limit=10):
+                if (msg.author == interaction.client.user
+                        and msg.interaction_metadata
+                        and msg.interaction_metadata.id == interaction.id):
+                    command_message = msg
+                    break
+        except Exception:
+            pass
+
         embed = discord.Embed(
             title=t["success_title"],
             color=NETFLIX_RED,
@@ -1755,6 +1756,26 @@ async def _generate_and_send_link(
 
         if interaction.guild:
             asyncio.create_task(_refresh_stats_message(interaction.guild.id))
+    else:
+        # No link generated – account may be unsubscribed or invalid
+        if info:
+            error_msg = (
+                "❌ This account is not currently active or cannot generate a login token. "
+                "It may be unsubscribed or expired."
+            )
+        else:
+            error_msg = "❌ Could not validate the account. Please try again later."
+        await interaction.edit_original_response(content=error_msg)
+        await log_user_activity(
+            interaction,
+            "❌ Failure",
+            error_msg,
+            used_txt_files=[chosen_file_name],
+            language=lang,
+            quality=quality_key,
+            device=device,
+        )
+        return
 
 class RetryView(discord.ui.View):
     def __init__(self, original_interaction: discord.Interaction, language: str) -> None:
