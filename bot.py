@@ -563,7 +563,6 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
             "5️⃣  Wait a few seconds for your personal link.\n\n"
             "*⚠️ Note: Links are single-use. Messages auto-delete after 1 minute for privacy.*"
         ),
-        # New error messages (English)
         "account_inactive": "❌ This account is not currently active or cannot generate a login token. It may be unsubscribed or expired.",
         "validation_failed": "❌ Could not validate the account. Please try again later.",
         "failure": "❌ Failure",
@@ -608,7 +607,6 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
             "5️⃣  انتظر بضع ثوانٍ للحصول على رابطك الشخصي.\n\n"
             "\u200f*⚠️ ملاحظة: الروابط للاستخدام مرة واحدة. يتم حذف الرسائل تلقائياً بعد دقيقة.*"
         ),
-        # New error messages (Arabic)
         "account_inactive": "❌ هذا الحساب غير نشط حاليًا أو لا يمكن إنشاء رمز تسجيل الدخول. قد يكون غير مشترك أو منتهي الصلاحية.",
         "validation_failed": "❌ تعذر التحقق من الحساب. يرجى المحاولة مرة أخرى لاحقًا.",
         "failure": "❌ فشل",
@@ -1586,6 +1584,39 @@ async def cleanup_messages(
                 pass
     log.info("Cleanup complete.")
 
+async def _delete_failed_cookie(quality_folder: str, filename: str) -> None:
+    """Delete a cookie file from local or GitHub (synchronous operation wrapped for async)."""
+    if COOKIES_GITHUB_REPO and COOKIES_GITHUB_PATH is not None:
+        base_path = (COOKIES_GITHUB_PATH.rstrip("/") + "/" + quality_folder) if COOKIES_GITHUB_PATH else quality_folder
+        file_path = f"{base_path.rstrip('/')}/{filename}"
+        try:
+            repo = _get_cookies_repo()
+            if repo:
+                content_obj = repo.get_contents(file_path, ref=COOKIES_GITHUB_BRANCH)
+                repo.delete_file(
+                    file_path,
+                    f"🗑️ Remove failed cookie [{filename}]",
+                    content_obj.sha,
+                    branch=COOKIES_GITHUB_BRANCH,
+                )
+                log.info(f"Deleted failed GitHub cookie: {file_path}")
+                return
+        except Exception as exc:
+            log.warning(f"Could not delete GitHub cookie {file_path}: {exc}")
+    local_path = COOKIES_FOLDER / quality_folder / filename
+    if local_path.exists():
+        try:
+            local_path.unlink()
+            log.info(f"Deleted failed local cookie: {local_path}")
+        except Exception as exc:
+            log.warning(f"Could not delete local cookie {local_path}: {exc}")
+
+async def _delete_and_refresh(quality_folder: str, filename: str, guild_id: Optional[int]) -> None:
+    """Delete a failed cookie and refresh the stock embed."""
+    await _delete_failed_cookie(quality_folder, filename)
+    if guild_id:
+        await _refresh_stats_message(guild_id)
+
 async def _generate_and_send_link(
     interaction: discord.Interaction,
     language: str,
@@ -1771,10 +1802,11 @@ async def _generate_and_send_link(
         else:
             error_msg = t["validation_failed"]
 
-        # Delete the problematic cookie file (fire-and-forget)
+        # Delete the problematic cookie file and then refresh stock embed
         if chosen_file_name:
-            asyncio.create_task(_delete_failed_cookie(quality_folder, chosen_file_name))
-            log.info(f"Scheduled deletion of failed cookie: {quality_folder}/{chosen_file_name}")
+            guild_id = interaction.guild.id if interaction.guild else None
+            asyncio.create_task(_delete_and_refresh(quality_folder, chosen_file_name, guild_id))
+            log.info(f"Scheduled deletion of failed cookie: {quality_folder}/{chosen_file_name} with stock refresh")
 
         # Create a RetryView with the current interaction and language
         retry_view = RetryView(interaction, lang)
@@ -2415,32 +2447,6 @@ async def global_interaction_check(interaction: discord.Interaction) -> bool:
         return False
 
     return True
-
-async def _delete_failed_cookie(quality_folder: str, filename: str) -> None:
-    if COOKIES_GITHUB_REPO and COOKIES_GITHUB_PATH is not None:
-        base_path = (COOKIES_GITHUB_PATH.rstrip("/") + "/" + quality_folder) if COOKIES_GITHUB_PATH else quality_folder
-        file_path = f"{base_path.rstrip('/')}/{filename}"
-        try:
-            repo = _get_cookies_repo()
-            if repo:
-                content_obj = repo.get_contents(file_path, ref=COOKIES_GITHUB_BRANCH)
-                repo.delete_file(
-                    file_path,
-                    f"🗑️ Remove failed cookie [{filename}]",
-                    content_obj.sha,
-                    branch=COOKIES_GITHUB_BRANCH,
-                )
-                log.info(f"Deleted failed GitHub cookie: {file_path}")
-                return
-        except Exception as exc:
-            log.warning(f"Could not delete GitHub cookie {file_path}: {exc}")
-    local_path = COOKIES_FOLDER / quality_folder / filename
-    if local_path.exists():
-        try:
-            local_path.unlink()
-            log.info(f"Deleted failed local cookie: {local_path}")
-        except Exception as exc:
-            log.warning(f"Could not delete local cookie {local_path}: {exc}")
 
 @bot.event
 async def on_ready() -> None:
