@@ -47,6 +47,8 @@ COOLDOWN_HOURS = 24
 
 NETFLIX_LOG_URL = "https://raw.githubusercontent.com/Afrsto/bot-users/main/Netflix-users.txt"
 
+MAX_CONCURRENT_CHECKS = int(os.environ.get("MAX_CONCURRENT_CHECKS", "10"))
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -1723,6 +1725,29 @@ async def _check_single_cookie(content: str, filename: str) -> bool:
             except Exception:
                 pass
 
+async def _process_single_file(
+    quality_folder: str,
+    filename: str,
+    content: str,
+    stats: Dict[str, int],
+    lock: asyncio.Lock,
+) -> None:
+    is_valid = await _check_single_cookie(content, filename)
+    async with lock:
+        if is_valid:
+            stats["valid"] += 1
+        else:
+            stats["invalid"] += 1
+            backup_ok = await asyncio.to_thread(_backup_cookie_file, content, filename, quality_folder)
+            if backup_ok:
+                stats["backup_success"] += 1
+                await _delete_failed_cookie(quality_folder, filename)
+                stats["deleted"] += 1
+            else:
+                stats["backup_failed"] += 1
+                stats["delete_failed"] += 1
+                log.warning(f"Skipping deletion of {filename} because backup failed.")
+
 @bot.tree.command(
     name="check_all",
     description="🔍 Validate all cookie accounts, backup invalid ones, and delete them (Admin only)",
@@ -1751,33 +1776,32 @@ async def check_all(interaction: discord.Interaction) -> None:
         "delete_failed": 0,
     }
 
-    progress_msg = await interaction.followup.send("🔄 Starting validation...", ephemeral=True)
+    progress_msg = await interaction.followup.send(
+        f"🔄 Starting validation of {total_files} files (max {MAX_CONCURRENT_CHECKS} concurrent)...",
+        ephemeral=True
+    )
 
+    semaphore = asyncio.Semaphore(MAX_CONCURRENT_CHECKS)
+    lock = asyncio.Lock()
     processed = 0
+
+    async def _worker(quality_folder: str, filename: str, content: str):
+        nonlocal processed
+        async with semaphore:
+            await _process_single_file(quality_folder, filename, content, stats, lock)
+            async with lock:
+                processed += 1
+                if processed % 5 == 0 or processed == total_files:
+                    await progress_msg.edit(
+                        content=f"🔄 Processing... {processed}/{total_files} files checked."
+                    )
+
+    tasks = []
     for quality_folder, file_list in all_files.items():
         for filename, content in file_list:
-            processed += 1
-            if processed % 5 == 0:
-                await progress_msg.edit(
-                    content=f"🔄 Processing... {processed}/{total_files} files checked."
-                )
+            tasks.append(asyncio.create_task(_worker(quality_folder, filename, content)))
 
-            is_valid = await _check_single_cookie(content, filename)
-            if is_valid:
-                stats["valid"] += 1
-            else:
-                stats["invalid"] += 1
-                backup_ok = await asyncio.to_thread(_backup_cookie_file, content, filename, quality_folder)
-                if backup_ok:
-                    stats["backup_success"] += 1
-                    await _delete_failed_cookie(quality_folder, filename)
-                    stats["deleted"] += 1
-                else:
-                    stats["backup_failed"] += 1
-                    log.warning(f"Skipping deletion of {filename} because backup failed.")
-                    stats["delete_failed"] += 1
-
-            await asyncio.sleep(0.2)
+    await asyncio.gather(*tasks)
 
     if interaction.guild:
         await _refresh_stats_message(interaction.guild.id)
