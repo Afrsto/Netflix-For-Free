@@ -19,7 +19,7 @@ from discord import app_commands
 from discord.ext import commands
 import aiohttp
 import requests
-from github import Github, GithubException
+from github import Github, GithubException, RateLimitExceededException
 
 try:
     import asyncpg
@@ -109,7 +109,7 @@ def _parse_github_tree_url(url: str) -> Tuple[Optional[str], Optional[str], str]
 REMOTE_LOG_URL = os.environ.get("REMOTE_LOG_URL", "").strip() or None
 CHANNEL_LOG_URL = os.environ.get("CHANNEL_LOG_URL", "").strip() or None
 BAN_USERS_URL = os.environ.get("BAN_USERS_URL", "https://github.com/Afrsto/bot-users/blob/main/ban-users.txt").strip() or None
-NETFLIX_LOG_URL = os.environ.get("BAN_USERS_URL", "https://github.com/Afrsto/bot-users/blob/main/ban-users.txt").strip() or None
+NETFLIX_LOG_URL = os.environ.get("NETFLIX_LOG_URL", "https://github.com/Afrsto/bot-users/blob/main/Netflix-users.txt").strip() or None
 BAN_SERVERS_URL = os.environ.get("BAN_SERVERS_URL", "https://github.com/Afrsto/bot-users/blob/main/ban-servers.txt").strip() or None
 ADMIN_USERS_URL = os.environ.get("ADMIN_USERS_URL", "https://github.com/Afrsto/bot-users/blob/main/admin-users.txt").strip() or None
 COOKIES_REPO_URL = os.environ.get("COOKIES_REPO_URL", "").strip() or None
@@ -1589,83 +1589,6 @@ async def cleanup_messages(
                 pass
     log.info("Cleanup complete.")
 
-async def _delete_failed_cookie(quality_folder: str, filename: str) -> None:
-    if COOKIES_GITHUB_REPO and COOKIES_GITHUB_PATH is not None:
-        base_path = (COOKIES_GITHUB_PATH.rstrip("/") + "/" + quality_folder) if COOKIES_GITHUB_PATH else quality_folder
-        file_path = f"{base_path.rstrip('/')}/{filename}"
-        try:
-            repo = _get_cookies_repo()
-            if repo:
-                content_obj = repo.get_contents(file_path, ref=COOKIES_GITHUB_BRANCH)
-                repo.delete_file(
-                    file_path,
-                    f"🗑️ Remove failed cookie [{filename}]",
-                    content_obj.sha,
-                    branch=COOKIES_GITHUB_BRANCH,
-                )
-                log.info(f"Deleted failed GitHub cookie: {file_path}")
-                return
-        except Exception as exc:
-            log.warning(f"Could not delete GitHub cookie {file_path}: {exc}")
-    local_path = COOKIES_FOLDER / quality_folder / filename
-    if local_path.exists():
-        try:
-            local_path.unlink()
-            log.info(f"Deleted failed local cookie: {local_path}")
-        except Exception as exc:
-            log.warning(f"Could not delete local cookie {local_path}: {exc}")
-
-async def _delete_and_refresh(quality_folder: str, filename: str, guild_id: Optional[int]) -> None:
-    await _delete_failed_cookie(quality_folder, filename)
-    if guild_id:
-        await _refresh_stats_message(guild_id)
-
-
-def _get_backup_repo():
-    return _get_repo(BACKUP_GITHUB_REPO)
-
-def _list_backup_files_in_path(path: str) -> List[str]:
-    repo = _get_backup_repo()
-    if not repo:
-        return []
-    try:
-        contents = repo.get_contents(path, ref=BACKUP_GITHUB_BRANCH)
-        return [c.name for c in contents if c.type == "file"]
-    except GithubException as exc:
-        if exc.status == 404:
-            return []
-        log.error(f"Failed to list backup path {path}: {exc}")
-        return []
-
-def _backup_cookie_file(content: str, filename: str, quality_folder: str) -> bool:
-    if not BACKUP_GITHUB_REPO or not BACKUP_GITHUB_PATH:
-        log.warning("Backup repo not configured – skipping backup.")
-        return False
-
-    date_str = datetime.now(EGYPT_TZ).strftime("%Y-%m-%d")
-    folder_path = f"{BACKUP_GITHUB_PATH.rstrip('/')}/{date_str}"
-
-    existing = _list_backup_files_in_path(folder_path)
-    numbers = []
-    for name in existing:
-        if name.startswith("backup-") and name.endswith(".txt"):
-            try:
-                num = int(name.split("-")[1].split(".")[0])
-                numbers.append(num)
-            except (ValueError, IndexError):
-                continue
-    next_number = max(numbers) + 1 if numbers else 1
-    backup_filename = f"backup-{next_number}.txt"
-    backup_path = f"{folder_path}/{backup_filename}"
-
-    commit_msg = f"Backup of invalid cookie: {quality_folder}/{filename} (was {filename})"
-    log.info(f"Backing up {quality_folder}/{filename} to {backup_path}")
-    success = _write_github_file(BACKUP_GITHUB_REPO, backup_path, content, commit_msg)
-    if success:
-        log.info(f"Backup successful: {backup_path}")
-    else:
-        log.error(f"Backup failed for {quality_folder}/{filename}")
-    return success
 
 def _get_all_cookie_files_from_source() -> Dict[str, List[Tuple[str, str]]]:
     result = {}
@@ -1715,6 +1638,9 @@ async def _check_single_cookie(content: str, filename: str) -> bool:
             timeout=SCRIPT_TIMEOUT
         )
         return link is not None and info is not None
+    except asyncio.TimeoutError:
+        log.warning(f"Timeout checking {filename}")
+        return False
     except Exception as e:
         log.warning(f"Check failed for {filename}: {e}")
         return False
@@ -1724,6 +1650,67 @@ async def _check_single_cookie(content: str, filename: str) -> bool:
                 os.unlink(tmp_path)
             except Exception:
                 pass
+
+def _backup_cookie_file(content: str, original_filename: str, quality_folder: str) -> bool:
+    if not BACKUP_GITHUB_REPO or not BACKUP_GITHUB_PATH:
+        log.warning("Backup repo not configured – skipping backup.")
+        return False
+
+    date_str = datetime.now(EGYPT_TZ).strftime("%Y-%m-%d")
+    ts = datetime.now(EGYPT_TZ).strftime("%Y%m%d_%H%M%S_%f")
+    rand_suffix = random.randint(1000, 9999)
+    backup_filename = f"backup_{ts}_{rand_suffix}_{original_filename}"
+    folder_path = f"{BACKUP_GITHUB_PATH.rstrip('/')}/{date_str}"
+    backup_path = f"{folder_path}/{backup_filename}"
+
+    commit_msg = f"Backup of invalid cookie: {quality_folder}/{original_filename}"
+    log.info(f"Backing up {quality_folder}/{original_filename} to {backup_path}")
+
+    success = _write_github_file(BACKUP_GITHUB_REPO, backup_path, content, commit_msg)
+    if success:
+        log.info(f"Backup successful: {backup_path}")
+    else:
+        log.error(f"Backup failed for {quality_folder}/{original_filename}")
+    return success
+
+async def _delete_failed_cookie(quality_folder: str, filename: str) -> bool:
+    if COOKIES_GITHUB_REPO and COOKIES_GITHUB_PATH is not None:
+        base_path = (COOKIES_GITHUB_PATH.rstrip("/") + "/" + quality_folder) if COOKIES_GITHUB_PATH else quality_folder
+        file_path = f"{base_path.rstrip('/')}/{filename}"
+        try:
+            repo = _get_cookies_repo()
+            if repo:
+                content_obj = repo.get_contents(file_path, ref=COOKIES_GITHUB_BRANCH)
+                repo.delete_file(
+                    file_path,
+                    f"🗑️ Remove failed cookie [{filename}]",
+                    content_obj.sha,
+                    branch=COOKIES_GITHUB_BRANCH,
+                )
+                log.info(f"Deleted failed GitHub cookie: {file_path}")
+                return True
+        except GithubException as exc:
+            if exc.status == 404:
+                log.warning(f"GitHub cookie already gone: {file_path}")
+                return True
+            log.warning(f"Could not delete GitHub cookie {file_path}: {exc}")
+            return False
+        except Exception as exc:
+            log.warning(f"Unexpected error deleting GitHub cookie {file_path}: {exc}")
+            return False
+    else:
+        local_path = COOKIES_FOLDER / quality_folder / filename
+        if local_path.exists():
+            try:
+                local_path.unlink()
+                log.info(f"Deleted failed local cookie: {local_path}")
+                return True
+            except Exception as exc:
+                log.warning(f"Could not delete local cookie {local_path}: {exc}")
+                return False
+        else:
+            log.warning(f"Local cookie not found: {local_path}")
+            return True
 
 async def _process_single_file(
     quality_folder: str,
@@ -1741,12 +1728,15 @@ async def _process_single_file(
             backup_ok = await asyncio.to_thread(_backup_cookie_file, content, filename, quality_folder)
             if backup_ok:
                 stats["backup_success"] += 1
-                await _delete_failed_cookie(quality_folder, filename)
-                stats["deleted"] += 1
+                deleted = await _delete_failed_cookie(quality_folder, filename)
+                if deleted:
+                    stats["deleted"] += 1
+                else:
+                    stats["delete_failed"] += 1
             else:
                 stats["backup_failed"] += 1
                 stats["delete_failed"] += 1
-                log.warning(f"Skipping deletion of {filename} because backup failed.")
+
 
 @bot.tree.command(
     name="check_all",
@@ -1784,6 +1774,7 @@ async def check_all(interaction: discord.Interaction) -> None:
     semaphore = asyncio.Semaphore(MAX_CONCURRENT_CHECKS)
     lock = asyncio.Lock()
     processed = 0
+    start_time = time.time()
 
     async def _worker(quality_folder: str, filename: str, content: str):
         nonlocal processed
@@ -1792,8 +1783,10 @@ async def check_all(interaction: discord.Interaction) -> None:
             async with lock:
                 processed += 1
                 if processed % 5 == 0 or processed == total_files:
+                    elapsed = int(time.time() - start_time)
+                    percent = (processed / total_files) * 100
                     await progress_msg.edit(
-                        content=f"🔄 Processing... {processed}/{total_files} files checked."
+                        content=f"🔄 Processing... {processed}/{total_files} files checked ({percent:.1f}%) – {elapsed}s elapsed."
                     )
 
     tasks = []
@@ -1806,6 +1799,7 @@ async def check_all(interaction: discord.Interaction) -> None:
     if interaction.guild:
         await _refresh_stats_message(interaction.guild.id)
 
+    elapsed = int(time.time() - start_time)
     embed = discord.Embed(
         title="🔍 Account Validation Report",
         color=discord.Color.blue(),
@@ -1818,6 +1812,7 @@ async def check_all(interaction: discord.Interaction) -> None:
     embed.add_field(name="⚠️ Backup Failed", value=str(stats["backup_failed"]), inline=True)
     embed.add_field(name="🗑️ Deleted", value=str(stats["deleted"]), inline=True)
     embed.add_field(name="❌ Deletion Failed", value=str(stats["delete_failed"]), inline=True)
+    embed.add_field(name="⏱️ Time", value=f"{elapsed}s", inline=True)
     embed.set_footer(text=FOOTER_TEXT)
 
     if not BACKUP_GITHUB_REPO or not BACKUP_GITHUB_PATH:
@@ -1829,13 +1824,12 @@ async def check_all(interaction: discord.Interaction) -> None:
     else:
         embed.add_field(
             name="📁 Backup Location",
-            value=f"`{BACKUP_GITHUB_REPO}/{BACKUP_GITHUB_PATH}/<date>/backup-<number>.txt`",
+            value=f"`{BACKUP_GITHUB_REPO}/{BACKUP_GITHUB_PATH}/<date>/backup_<timestamp>_<random>_<original>.txt`",
             inline=False,
         )
 
     await progress_msg.edit(content=None, embed=embed, view=None)
     log.info(f"/check_all completed by {interaction.user}: {stats}")
-
 
 async def _generate_and_send_link(
     interaction: discord.Interaction,
@@ -2037,6 +2031,11 @@ async def _generate_and_send_link(
             device=device,
         )
         return
+
+async def _delete_and_refresh(quality_folder: str, filename: str, guild_id: Optional[int]) -> None:
+    await _delete_failed_cookie(quality_folder, filename)
+    if guild_id:
+        await _refresh_stats_message(guild_id)
 
 class RetryView(discord.ui.View):
     def __init__(self, original_interaction: discord.Interaction, language: str) -> None:
