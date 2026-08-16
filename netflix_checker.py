@@ -732,6 +732,40 @@ def _build_info_dict(info: Dict[str, Any], is_subscribed: bool) -> Dict[str, Any
         "expires_at": "N/A",
     }
 
+def quick_check_cookie_content(content: str) -> Tuple[bool, Optional[Dict[str, Any]]]:
+    """Validate cookie membership without creating a login token (no notifications)."""
+    if not content:
+        return False, None
+
+    cookies_dict = extract_cookies_dict(content)
+    if not cookies_dict or "NetflixId" not in cookies_dict:
+        return False, None
+
+    session = _get_session()
+    session.cookies.clear()
+    for name, value in cookies_dict.items():
+        session.cookies.set(name, value, domain=".netflix.com", path="/")
+
+    _, status_code, info = get_account_page(session)
+    if status_code != 200 or not info:
+        return False, None
+
+    is_subscribed = is_subscribed_account(info)
+    info_dict = _build_info_dict(info, is_subscribed)
+    if not is_subscribed:
+        return False, info_dict
+    return True, info_dict
+
+
+def quick_check_cookie_file(file_path: str) -> Tuple[bool, Optional[Dict[str, Any]]]:
+    try:
+        with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+            content = f.read()
+    except Exception:
+        return False, None
+    return quick_check_cookie_content(content)
+
+
 def check_cookie_file(file_path: str, device: str = "pc") -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
     if device not in LOGIN_DEVICES:
         device = "pc"
