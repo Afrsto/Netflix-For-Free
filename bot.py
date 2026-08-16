@@ -9,10 +9,10 @@ import threading
 import re
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, time as dt_time, timedelta, time as dt_time
 from pathlib import Path
 from base64 import b64decode
-from typing import Optional, List, Dict, Any, Tuple, Set
+from typing import Optional, List, Dict, Any, Tuple, Set, Callable, Awaitable
 from zoneinfo import ZoneInfo
 from urllib.parse import urlparse
 
@@ -42,11 +42,15 @@ USER_LOG_FILE = Path("users.txt")
 CONFIG_FILE = Path("config.json")
 SETUP_TRACKER_FILE = Path("setup_messages.json")
 GUILD_CONFIG_FILE = Path("guild_config.json")
+CHECK_ALL_SCHEDULE_FILE = Path("check_all_schedule.json")
 SCRIPT_TIMEOUT = 90
 QUICK_CHECK_TIMEOUT = 15
 CREATE_LINK_BUDGET_SECONDS = 600
 CLEANUP_DELAY_SECONDS = 60
 COOLDOWN_HOURS = 24
+CHECK_ALL_HOUR = 3
+CHECK_ALL_MINUTE = 0
+CHECK_ALL_INTERVAL_DAYS = 2
 
 _DEFAULT_NETFLIX_LOG_URL = "https://raw.githubusercontent.com/Afrsto/bot-users/main/Netflix-users.txt"
 NETFLIX_LOG_URL = os.environ.get("NETFLIX_LOG_URL", "").strip() or _DEFAULT_NETFLIX_LOG_URL
@@ -1005,6 +1009,86 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 channel_log_config = ChannelLogConfig()
 monitor = NetflixMonitor(bot, channel_log_config)
 
+class CheckAllScheduler:
+    """Run cookie quick-check every 2 days at 03:00 Africa/Cairo."""
+
+    def __init__(self, bot: commands.Bot):
+        self.bot = bot
+        self.running = False
+        self.task: Optional[asyncio.Task] = None
+
+    def start(self):
+        if self.running:
+            return
+        self.running = True
+        self.task = asyncio.create_task(self._run())
+
+    async def stop(self):
+        self.running = False
+        if self.task:
+            self.task.cancel()
+            try:
+                await self.task
+            except asyncio.CancelledError:
+                pass
+
+    async def _sleep_until(self, target: datetime) -> None:
+        while self.running:
+            now = datetime.now(EGYPT_TZ)
+            remaining = (target - now).total_seconds()
+            if remaining <= 0:
+                return
+            await asyncio.sleep(min(remaining, 3600))
+
+    async def _refresh_all_guild_stocks(self) -> None:
+        guild_ids = set()
+        for gid_str in config.guilds.keys():
+            try:
+                guild_ids.add(int(gid_str))
+            except (TypeError, ValueError):
+                continue
+        if ALLOWED_GUILD_IDS:
+            guild_ids.update(ALLOWED_GUILD_IDS)
+        for guild_id in guild_ids:
+            if not config.get_channel_for_guild(guild_id):
+                continue
+            try:
+                await _refresh_stats_message(guild_id)
+            except Exception as exc:
+                log.warning(f"Scheduled check_all stock refresh failed for guild {guild_id}: {exc}")
+
+    async def _run(self):
+        next_run = _next_check_all_run()
+        log.info(
+            f"CheckAllScheduler started – next run at {next_run.strftime('%Y-%m-%d %H:%M %Z')} "
+            f"(every {CHECK_ALL_INTERVAL_DAYS} days at {CHECK_ALL_HOUR:02d}:{CHECK_ALL_MINUTE:02d} Egypt)."
+        )
+        while self.running:
+            try:
+                next_run = _next_check_all_run()
+                log.info(f"CheckAllScheduler sleeping until {next_run.isoformat()}")
+                await self._sleep_until(next_run)
+                if not self.running:
+                    break
+
+                lock = _get_check_all_lock()
+                if lock.locked():
+                    log.info("CheckAllScheduler: manual /check_all in progress – waiting for lock.")
+
+                log.info("CheckAllScheduler: starting scheduled quick-check…")
+                stats = await run_check_all_pipeline()
+                finished_at = datetime.now(EGYPT_TZ)
+                _save_check_all_last_run(finished_at)
+                await self._refresh_all_guild_stocks()
+                log.info(f"CheckAllScheduler completed: {stats}")
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                log.error(f"CheckAllScheduler error: {e}", exc_info=True)
+                await asyncio.sleep(60)
+
+check_all_scheduler = CheckAllScheduler(bot)
+
 class Config:
     def __init__(self) -> None:
         self.guilds: Dict[str, int] = {}
@@ -1784,75 +1868,115 @@ async def _process_single_file(
             stats["backup_failed"] += 1
         log.warning(f"Skipping deletion of {filename} because backup failed.")
 
-@bot.tree.command(
-    name="check_all",
-    description="Quick-validate all cookies (no login links), backup and delete invalids (Admin)",
-)
-async def check_all(interaction: discord.Interaction) -> None:
-    lang = get_user_lang(interaction)
-    if not is_admin(interaction.user.id):
-        await interaction.response.send_message(TRANSLATIONS[lang]["not_admin"], ephemeral=True)
-        return
+_check_all_lock: Optional[asyncio.Lock] = None
 
-    await interaction.response.defer(ephemeral=True)
+def _get_check_all_lock() -> asyncio.Lock:
+    global _check_all_lock
+    if _check_all_lock is None:
+        _check_all_lock = asyncio.Lock()
+    return _check_all_lock
 
-    all_files = await _get_all_cookie_files_from_source()
-    total_files = sum(len(lst) for lst in all_files.values())
-    if total_files == 0:
-        await interaction.followup.send("❌ No cookie files found to check.", ephemeral=True)
-        return
+def _load_check_all_last_run() -> Optional[datetime]:
+    if not CHECK_ALL_SCHEDULE_FILE.exists():
+        return None
+    try:
+        data = json.loads(CHECK_ALL_SCHEDULE_FILE.read_text(encoding="utf-8"))
+        raw = data.get("last_run")
+        if not raw:
+            return None
+        dt = datetime.fromisoformat(raw)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=EGYPT_TZ)
+        return dt.astimezone(EGYPT_TZ)
+    except Exception as exc:
+        log.warning(f"Failed to read {CHECK_ALL_SCHEDULE_FILE}: {exc}")
+        return None
 
-    stats = {
-        "total": total_files,
-        "valid": 0,
-        "invalid": 0,
-        "backup_success": 0,
-        "backup_failed": 0,
-        "deleted": 0,
-        "delete_failed": 0,
-    }
+def _save_check_all_last_run(when: datetime) -> None:
+    try:
+        when_egypt = when.astimezone(EGYPT_TZ) if when.tzinfo else when.replace(tzinfo=EGYPT_TZ)
+        CHECK_ALL_SCHEDULE_FILE.write_text(
+            json.dumps({"last_run": when_egypt.isoformat()}, indent=2),
+            encoding="utf-8",
+        )
+    except Exception as exc:
+        log.warning(f"Failed to write {CHECK_ALL_SCHEDULE_FILE}: {exc}")
 
-    progress_msg = await interaction.followup.send(
-        f"🔄 Quick-checking {total_files} files (max {MAX_CONCURRENT_CHECKS} concurrent, no login tokens)...",
-        ephemeral=True
-    )
+def _next_check_all_run(now: Optional[datetime] = None) -> datetime:
+    """Next 03:00 Egypt run on the every-2-days cadence."""
+    now = now or datetime.now(EGYPT_TZ)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=EGYPT_TZ)
+    else:
+        now = now.astimezone(EGYPT_TZ)
 
-    semaphore = asyncio.Semaphore(MAX_CONCURRENT_CHECKS)
-    stats_lock = asyncio.Lock()
-    backup_lock = asyncio.Lock()
-    processed = 0
+    last_run = _load_check_all_last_run()
+    target_tod = dt_time(hour=CHECK_ALL_HOUR, minute=CHECK_ALL_MINUTE)
 
-    async def _worker(quality_folder: str, filename: str, content: str):
-        nonlocal processed
-        async with semaphore:
-            await _process_single_file(
-                quality_folder, filename, content, stats, stats_lock, backup_lock
-            )
-            should_update = False
-            async with stats_lock:
-                processed += 1
-                if processed % 10 == 0 or processed == total_files:
-                    should_update = True
-                    current = processed
-            if should_update:
-                try:
-                    await progress_msg.edit(
-                        content=f"🔄 Processing... {current}/{total_files} files checked."
-                    )
-                except Exception:
-                    pass
+    if last_run is None:
+        candidate = datetime.combine(now.date(), target_tod, tzinfo=EGYPT_TZ)
+        if candidate <= now:
+            candidate = candidate + timedelta(days=1)
+        return candidate
 
-    tasks = [
-        asyncio.create_task(_worker(quality_folder, filename, content))
-        for quality_folder, file_list in all_files.items()
-        for filename, content in file_list
-    ]
+    base_date = last_run.astimezone(EGYPT_TZ).date() + timedelta(days=CHECK_ALL_INTERVAL_DAYS)
+    candidate = datetime.combine(base_date, target_tod, tzinfo=EGYPT_TZ)
+    while candidate <= now:
+        candidate = candidate + timedelta(days=CHECK_ALL_INTERVAL_DAYS)
+    return candidate
 
-    await asyncio.gather(*tasks)
+async def run_check_all_pipeline(
+    progress_callback: Optional[Callable[[int, int], Awaitable[None]]] = None,
+) -> Dict[str, int]:
+    """Quick-validate all cookies; backup and delete invalids. Shared by slash + scheduler."""
+    lock = _get_check_all_lock()
+    async with lock:
+        all_files = await _get_all_cookie_files_from_source()
+        total_files = sum(len(lst) for lst in all_files.values())
+        stats = {
+            "total": total_files,
+            "valid": 0,
+            "invalid": 0,
+            "backup_success": 0,
+            "backup_failed": 0,
+            "deleted": 0,
+            "delete_failed": 0,
+        }
+        if total_files == 0:
+            return stats
 
-    if interaction.guild:
-        await _refresh_stats_message(interaction.guild.id)
+        semaphore = asyncio.Semaphore(MAX_CONCURRENT_CHECKS)
+        stats_lock = asyncio.Lock()
+        backup_lock = asyncio.Lock()
+        processed = 0
 
+        async def _worker(quality_folder: str, filename: str, content: str):
+            nonlocal processed
+            async with semaphore:
+                await _process_single_file(
+                    quality_folder, filename, content, stats, stats_lock, backup_lock
+                )
+                should_update = False
+                async with stats_lock:
+                    processed += 1
+                    if processed % 10 == 0 or processed == total_files:
+                        should_update = True
+                        current = processed
+                if should_update and progress_callback is not None:
+                    try:
+                        await progress_callback(current, total_files)
+                    except Exception:
+                        pass
+
+        tasks = [
+            asyncio.create_task(_worker(quality_folder, filename, content))
+            for quality_folder, file_list in all_files.items()
+            for filename, content in file_list
+        ]
+        await asyncio.gather(*tasks)
+        return stats
+
+def _build_check_all_report_embed(stats: Dict[str, int]) -> discord.Embed:
     embed = discord.Embed(
         title="🔍 Quick Check Report",
         color=discord.Color.blue(),
@@ -1866,7 +1990,6 @@ async def check_all(interaction: discord.Interaction) -> None:
     embed.add_field(name="🗑️ Deleted", value=str(stats["deleted"]), inline=True)
     embed.add_field(name="❌ Deletion Failed", value=str(stats["delete_failed"]), inline=True)
     embed.set_footer(text=FOOTER_TEXT)
-
     if not BACKUP_GITHUB_REPO or not BACKUP_GITHUB_PATH:
         embed.add_field(
             name="⚠️ Backup Warning",
@@ -1879,8 +2002,49 @@ async def check_all(interaction: discord.Interaction) -> None:
             value=f"`{BACKUP_GITHUB_REPO}/{BACKUP_GITHUB_PATH}/<date>/backup-<number>.txt`",
             inline=False,
         )
+    return embed
 
-    await progress_msg.edit(content=None, embed=embed, view=None)
+@bot.tree.command(
+    name="check_all",
+    description="Quick-validate all cookies (no login links), backup and delete invalids (Admin)",
+)
+async def check_all(interaction: discord.Interaction) -> None:
+    lang = get_user_lang(interaction)
+    if not is_admin(interaction.user.id):
+        await interaction.response.send_message(TRANSLATIONS[lang]["not_admin"], ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    lock = _get_check_all_lock()
+    if lock.locked():
+        progress_msg = await interaction.followup.send(
+            "⏳ Another check is already running. Waiting for it to finish, then starting yours…",
+            ephemeral=True,
+        )
+    else:
+        progress_msg = await interaction.followup.send(
+            f"🔄 Quick-checking cookies (max {MAX_CONCURRENT_CHECKS} concurrent, no login tokens)...",
+            ephemeral=True,
+        )
+
+    async def _progress(processed: int, total: int) -> None:
+        try:
+            await progress_msg.edit(
+                content=f"🔄 Processing... {processed}/{total} files checked."
+            )
+        except Exception:
+            pass
+
+    stats = await run_check_all_pipeline(progress_callback=_progress)
+    if stats["total"] == 0:
+        await progress_msg.edit(content="❌ No cookie files found to check.")
+        return
+
+    if interaction.guild:
+        await _refresh_stats_message(interaction.guild.id)
+
+    await progress_msg.edit(content=None, embed=_build_check_all_report_embed(stats), view=None)
     log.info(f"/check_all completed by {interaction.user}: {stats}")
 
 
@@ -2808,6 +2972,7 @@ async def on_ready() -> None:
     bot.tree.interaction_check = global_interaction_check
 
     monitor.start()
+    check_all_scheduler.start()
 
     if ALLOWED_GUILD_IDS:
         for guild_id in ALLOWED_GUILD_IDS:
