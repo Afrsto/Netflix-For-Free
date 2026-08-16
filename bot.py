@@ -55,11 +55,12 @@ CHECK_ALL_INTERVAL_DAYS = 2
 _DEFAULT_NETFLIX_LOG_URL = "https://raw.githubusercontent.com/Afrsto/bot-users/main/Netflix-users.txt"
 NETFLIX_LOG_URL = os.environ.get("NETFLIX_LOG_URL", "").strip() or _DEFAULT_NETFLIX_LOG_URL
 
-MAX_CONCURRENT_CHECKS = int(os.environ.get("MAX_CONCURRENT_CHECKS", "20"))
+MAX_CONCURRENT_CHECKS = int(os.environ.get("MAX_CONCURRENT_CHECKS", "8"))
 _check_all_executor = ThreadPoolExecutor(
     max_workers=max(1, MAX_CONCURRENT_CHECKS),
     thread_name_prefix="check_all",
 )
+CREATE_SAME_COOKIE_TIMEOUT_RETRIES = 2
 
 logging.basicConfig(
     level=logging.INFO,
@@ -548,6 +549,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "tv_label": "TV",
         "progress": "⏳ **Generating your Netflix link… please wait.**",
         "retry_status": "⏳ Still generating your login link… trying again (attempt {attempt}).",
+        "wait_stock_check": "⏳ Stock check is running… please wait. Your link will generate when it finishes.",
         "no_cookies_folder": "❌ Cookies folder not found. Please contact the administrator.",
         "no_cookie_files": "❌ No accounts available right now. Please try again later.",
         "timeout": "⌛ Validation took too long. Please try again later.",
@@ -593,6 +595,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "tv_label": "TV",
         "progress": "\u200f⏳ **جاري إنشاء الرابط الخاص بك… يرجى الانتظار.**",
         "retry_status": "\u200f⏳ ما زلنا ننشئ رابط الدخول… إعادة المحاولة (محاولة {attempt}).",
+        "wait_stock_check": "\u200f⏳ جاري فحص المخزون… يرجى الانتظار. سيتم إنشاء الرابط بعد انتهائه.",
         "no_cookies_folder": "\u200f❌ مجلد ملفات تعريف الارتباط غير موجود. يرجى الاتصال بالمسؤول.",
         "no_cookie_files": "\u200f❌ لا توجد حسابات متاحة حالياً. حاول لاحقاً.",
         "timeout": "\u200f⌛ استغرق التحقق وقتاً طويلاً. يرجى المحاولة مرة أخرى.",
@@ -2185,6 +2188,48 @@ async def _send_success_link_response(
         asyncio.create_task(_refresh_stats_message(interaction.guild.id))
 
 
+def _cookie_info_is_confirmed_inactive(info: Optional[Dict[str, Any]]) -> bool:
+    """True when checker returned account info that clearly is not an active subscription."""
+    if info is None:
+        return True
+    status = str(info.get("membership_status") or "").strip().upper()
+    if status in {
+        "FORMER_MEMBER",
+        "NEVER_MEMBER",
+        "ANONYMOUS",
+        "FORMER",
+        "INACTIVE",
+        "CANCELLED",
+        "CANCELED",
+    }:
+        return True
+    if status in {"CURRENT_MEMBER", "CURRENT"}:
+        return False
+    plan = str(info.get("plan") or "N/A").strip()
+    days = str(info.get("days_left") or "N/A").strip()
+    if plan == "N/A" and days == "N/A" and status in {"", "N/A"}:
+        return True
+    return False
+
+
+async def _wait_for_check_all_idle(interaction: discord.Interaction, language: str) -> None:
+    """Do not start Netflix create work while /check_all (manual or scheduled) holds the lock."""
+    lock = _get_check_all_lock()
+    if not lock.locked():
+        return
+    t = TRANSLATIONS[language]
+    try:
+        await interaction.edit_original_response(content=t["wait_stock_check"], embed=None, view=None)
+    except Exception:
+        pass
+    while lock.locked():
+        await asyncio.sleep(1)
+        try:
+            await interaction.edit_original_response(content=t["wait_stock_check"], embed=None, view=None)
+        except Exception:
+            pass
+
+
 async def _generate_and_send_link(
     interaction: discord.Interaction,
     language: str,
@@ -2198,7 +2243,12 @@ async def _generate_and_send_link(
     quality_folder = QUALITY_FOLDER_MAP[quality_key]
     guild_id = interaction.guild.id if interaction.guild else None
 
+    await _wait_for_check_all_idle(interaction, lang)
+
     exclude_names: Set[str] = set()
+    soft_timeout_counts: Dict[str, int] = {}
+    retry_same_name: Optional[str] = None
+    retry_same_content: Optional[str] = None
     attempt = 0
     deadline = time.monotonic() + CREATE_LINK_BUDGET_SECONDS
     last_info: Optional[Dict[str, Any]] = None
@@ -2213,7 +2263,14 @@ async def _generate_and_send_link(
         except Exception:
             pass
 
-        chosen_file_name, cookie_content = await _pick_cookie_candidate(quality_folder, exclude_names)
+        # If a scheduled/manual check_all started while we were retrying, pause again.
+        await _wait_for_check_all_idle(interaction, lang)
+
+        if retry_same_content is not None and retry_same_name is not None:
+            chosen_file_name, cookie_content = retry_same_name, retry_same_content
+            retry_same_name, retry_same_content = None, None
+        else:
+            chosen_file_name, cookie_content = await _pick_cookie_candidate(quality_folder, exclude_names)
         if cookie_content is None:
             if chosen_file_name:
                 exclude_names.add(chosen_file_name)
@@ -2230,9 +2287,12 @@ async def _generate_and_send_link(
             break
 
         last_chosen = chosen_file_name
+        saved_content = cookie_content
         tmp_path: Optional[str] = None
         link = None
         info = None
+        timed_out = False
+        errored = False
         try:
             with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False, encoding="utf-8") as tmp:
                 tmp.write(cookie_content)
@@ -2244,9 +2304,11 @@ async def _generate_and_send_link(
                     timeout=SCRIPT_TIMEOUT,
                 )
             except asyncio.TimeoutError:
+                timed_out = True
                 saw_timeout = True
                 log.warning(f"Link generation timeout on attempt {attempt} ({chosen_file_name})")
             except Exception as exc:
+                errored = True
                 log.error(f"Checker error on attempt {attempt}: {exc}")
         finally:
             if tmp_path:
@@ -2263,19 +2325,48 @@ async def _generate_and_send_link(
             return
 
         last_info = info
+
+        # Timeout / transport errors: keep the cookie; retry same file a few times, then soft-skip.
+        if timed_out or errored:
+            key = chosen_file_name or ""
+            soft_timeout_counts[key] = soft_timeout_counts.get(key, 0) + 1
+            if soft_timeout_counts[key] > CREATE_SAME_COOKIE_TIMEOUT_RETRIES:
+                if chosen_file_name:
+                    exclude_names.add(chosen_file_name)
+                log.warning(
+                    f"Soft-excluding {quality_folder}/{chosen_file_name} after "
+                    f"{soft_timeout_counts[key]} timeout/error attempts (file kept)."
+                )
+            else:
+                retry_same_name = chosen_file_name
+                retry_same_content = saved_content
+                log.info(
+                    f"Keeping {quality_folder}/{chosen_file_name} after timeout/error "
+                    f"(retry {soft_timeout_counts[key]}/{CREATE_SAME_COOKIE_TIMEOUT_RETRIES})."
+                )
+            continue
+
+        # Confirmed invalid → delete. Active account with missing link (nftoken flake) → soft-exclude only.
+        should_delete = _cookie_info_is_confirmed_inactive(info)
         if chosen_file_name:
             exclude_names.add(chosen_file_name)
-            await _delete_failed_cookie(quality_folder, chosen_file_name)
-            log.info(
-                f"Auto-retry: removed failed cookie {quality_folder}/{chosen_file_name} "
-                f"(attempt {attempt})"
-            )
-            if guild_id:
-                asyncio.create_task(_refresh_stats_message(guild_id))
+            if should_delete:
+                await _delete_failed_cookie(quality_folder, chosen_file_name)
+                log.info(
+                    f"Auto-retry: removed confirmed-invalid cookie {quality_folder}/{chosen_file_name} "
+                    f"(attempt {attempt})"
+                )
+                if guild_id:
+                    asyncio.create_task(_refresh_stats_message(guild_id))
+            else:
+                log.info(
+                    f"Soft-excluding {quality_folder}/{chosen_file_name} "
+                    f"(likely token flake; file kept, attempt {attempt})"
+                )
 
-    if last_info:
+    if last_info and _cookie_info_is_confirmed_inactive(last_info):
         error_msg = t["account_inactive"]
-    elif saw_timeout and not exclude_names:
+    elif saw_timeout:
         error_msg = t["timeout"]
     else:
         error_msg = t["validation_failed"]
