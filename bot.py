@@ -7,11 +7,12 @@ import logging
 import tempfile
 import threading
 import re
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from base64 import b64decode
-from typing import Optional, List, Dict, Any, Tuple
+from typing import Optional, List, Dict, Any, Tuple, Set
 from zoneinfo import ZoneInfo
 from urllib.parse import urlparse
 
@@ -41,8 +42,9 @@ USER_LOG_FILE = Path("users.txt")
 CONFIG_FILE = Path("config.json")
 SETUP_TRACKER_FILE = Path("setup_messages.json")
 GUILD_CONFIG_FILE = Path("guild_config.json")
-SCRIPT_TIMEOUT = 30
+SCRIPT_TIMEOUT = 90
 QUICK_CHECK_TIMEOUT = 15
+CREATE_LINK_BUDGET_SECONDS = 600
 CLEANUP_DELAY_SECONDS = 60
 COOLDOWN_HOURS = 24
 
@@ -50,6 +52,10 @@ _DEFAULT_NETFLIX_LOG_URL = "https://raw.githubusercontent.com/Afrsto/bot-users/m
 NETFLIX_LOG_URL = os.environ.get("NETFLIX_LOG_URL", "").strip() or _DEFAULT_NETFLIX_LOG_URL
 
 MAX_CONCURRENT_CHECKS = int(os.environ.get("MAX_CONCURRENT_CHECKS", "20"))
+_check_all_executor = ThreadPoolExecutor(
+    max_workers=max(1, MAX_CONCURRENT_CHECKS),
+    thread_name_prefix="check_all",
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -537,6 +543,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "phone_label": "Phone",
         "tv_label": "TV",
         "progress": "⏳ **Generating your Netflix link… please wait.**",
+        "retry_status": "⏳ Still generating your login link… trying again (attempt {attempt}).",
         "no_cookies_folder": "❌ Cookies folder not found. Please contact the administrator.",
         "no_cookie_files": "❌ No accounts available right now. Please try again later.",
         "timeout": "⌛ Validation took too long. Please try again later.",
@@ -581,6 +588,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "phone_label": "Phone",
         "tv_label": "TV",
         "progress": "\u200f⏳ **جاري إنشاء الرابط الخاص بك… يرجى الانتظار.**",
+        "retry_status": "\u200f⏳ ما زلنا ننشئ رابط الدخول… إعادة المحاولة (محاولة {attempt}).",
         "no_cookies_folder": "\u200f❌ مجلد ملفات تعريف الارتباط غير موجود. يرجى الاتصال بالمسؤول.",
         "no_cookie_files": "\u200f❌ لا توجد حسابات متاحة حالياً. حاول لاحقاً.",
         "timeout": "\u200f⌛ استغرق التحقق وقتاً طويلاً. يرجى المحاولة مرة أخرى.",
@@ -1725,10 +1733,14 @@ async def _get_all_cookie_files_from_source() -> Dict[str, List[Tuple[str, str]]
     folder_results = await asyncio.gather(*[_load_folder(folder) for folder in folders])
     return {folder: files for folder, files in folder_results}
 
+async def _run_in_check_all_executor(func, *args):
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(_check_all_executor, func, *args)
+
 async def _check_single_cookie(content: str, filename: str) -> bool:
     try:
         is_valid, _info = await asyncio.wait_for(
-            asyncio.to_thread(quick_check_cookie_content, content),
+            _run_in_check_all_executor(quick_check_cookie_content, content),
             timeout=QUICK_CHECK_TIMEOUT,
         )
         return bool(is_valid)
@@ -1751,10 +1763,14 @@ async def _process_single_file(
         return
 
     async with backup_lock:
-        backup_ok = await asyncio.to_thread(_backup_cookie_file, content, filename, quality_folder)
+        backup_ok = await _run_in_check_all_executor(
+            _backup_cookie_file, content, filename, quality_folder
+        )
 
     if backup_ok:
-        deleted = await _delete_failed_cookie(quality_folder, filename)
+        deleted = await _run_in_check_all_executor(
+            _delete_failed_cookie_sync, quality_folder, filename
+        )
         async with stats_lock:
             stats["invalid"] += 1
             stats["backup_success"] += 1
@@ -1868,6 +1884,143 @@ async def check_all(interaction: discord.Interaction) -> None:
     log.info(f"/check_all completed by {interaction.user}: {stats}")
 
 
+async def _pick_cookie_candidate(
+    quality_folder: str,
+    exclude_names: Set[str],
+) -> Tuple[Optional[str], Optional[str]]:
+    """Return (filename, content), skipping names in exclude_names."""
+    if COOKIES_GITHUB_REPO and COOKIES_GITHUB_PATH is not None:
+        base_path = (COOKIES_GITHUB_PATH.rstrip("/") + "/" + quality_folder) if COOKIES_GITHUB_PATH else quality_folder
+        github_names = await asyncio.to_thread(_fetch_github_cookie_list_in_path, base_path)
+        available = [n for n in github_names if n not in exclude_names]
+        if available:
+            chosen_file_name = await asyncio.to_thread(pick_github_cookie_rotation, available)
+            cookie_content = await asyncio.to_thread(
+                _fetch_github_cookie_content_in_path, base_path, chosen_file_name
+            )
+            if cookie_content is not None:
+                return chosen_file_name, cookie_content
+
+    local_dir = COOKIES_FOLDER / quality_folder
+    if not local_dir.exists():
+        local_dir = COOKIES_FOLDER
+    if not local_dir.exists():
+        return None, None
+
+    txt_files = [p for p in local_dir.glob("*.txt") if p.name not in exclude_names]
+    if not txt_files:
+        return None, None
+
+    chosen_path = pick_cookie_file(txt_files)
+    try:
+        return chosen_path.name, chosen_path.read_text(encoding="utf-8")
+    except Exception as exc:
+        log.error(f"Failed to read local cookie: {exc}")
+        return chosen_path.name, None
+
+
+async def _send_success_link_response(
+    interaction: discord.Interaction,
+    language: str,
+    quality_key: str,
+    device: str,
+    link: str,
+    info: Dict[str, Any],
+    chosen_file_name: Optional[str],
+    lang_message: Optional[discord.Message],
+    confirm_message: Optional[discord.Message],
+) -> None:
+    lang = language
+    t = TRANSLATIONS[lang]
+    channel = interaction.channel
+    command_message = None
+    try:
+        async for msg in channel.history(limit=10):
+            if (msg.author == interaction.client.user
+                    and msg.interaction_metadata
+                    and msg.interaction_metadata.id == interaction.id):
+                command_message = msg
+                break
+    except Exception:
+        pass
+
+    embed = discord.Embed(
+        title=t["success_title"],
+        color=NETFLIX_RED,
+        timestamp=datetime.now(),
+    )
+    embed.set_thumbnail(url=NETFLIX_LOGO)
+
+    field_map = {
+        "👤 Name": info.get("name", "N/A"),
+        "✉️ Email": info.get("email", "N/A"),
+        "🌍 Country": info.get("country", "N/A"),
+        "🎁 Plan": info.get("plan", "N/A"),
+        "💰 Plan Price": info.get("plan_price", "N/A"),
+        "📺 Max Streams": info.get("max_streams", "N/A"),
+        "📅 Member Since": info.get("member_since", "N/A"),
+        "🔄 Next Billing": info.get("next_billing", "N/A"),
+        "📊 Quality": info.get("quality", "N/A"),
+        "💳 Payment": info.get("payment", "N/A"),
+        "🏧 Card": info.get("card", "N/A"),
+        "📱 Phone": info.get("phone", "N/A"),
+        "⏸️ Days Left": info.get("days_left", "N/A"),
+        "🎫 Membership": info.get("membership_status", "N/A"),
+        "👤 Profiles": info.get("profiles", "N/A"),
+        "⏳ Expires at": info.get("expires_at", "N/A"),
+    }
+
+    for name, value in field_map.items():
+        if value and value != "N/A":
+            embed.add_field(name=name, value=f"`{value}`", inline=False)
+
+    embed.add_field(
+        name="🔗 Login Link",
+        value=f"Click the link below to log in automatically:\n{link}",
+        inline=False
+    )
+    embed.set_footer(text=t["footer"] + "  •  X2 Salah Utility 🎬")
+
+    await interaction.edit_original_response(content=None, embed=embed, view=None)
+    first_message = await interaction.original_response()
+
+    activity_timestamp = datetime.now(EGYPT_TZ).strftime("%Y-%m-%d %H:%M:%S")
+    used_files = [chosen_file_name] if chosen_file_name else []
+    asyncio.create_task(
+        send_user_activity_to_log_channel(
+            interaction,
+            info,
+            quality_key,
+            device,
+            "✅ Success",
+            "Link generated",
+            used_files,
+            language,
+            activity_timestamp
+        )
+    )
+    asyncio.create_task(
+        log_user_activity(
+            interaction, "✅ Success", "Link generated",
+            used_txt_files=[chosen_file_name], language=lang, quality=quality_key, device=device,
+            plan=info.get("plan", "N/A"),
+            days_left=info.get("days_left", "N/A"),
+            timestamp=activity_timestamp
+        )
+    )
+    asyncio.create_task(cleanup_messages(
+        channel=channel,
+        command_message=command_message,
+        original_response=first_message,
+        followup_message=None,
+        lang_message=lang_message,
+        confirm_message=confirm_message,
+        delay_seconds=CLEANUP_DELAY_SECONDS,
+    ))
+    if interaction.guild:
+        asyncio.create_task(_refresh_stats_message(interaction.guild.id))
+
+
 async def _generate_and_send_link(
     interaction: discord.Interaction,
     language: str,
@@ -1879,195 +2032,102 @@ async def _generate_and_send_link(
     lang = language
     t = TRANSLATIONS[lang]
     quality_folder = QUALITY_FOLDER_MAP[quality_key]
+    guild_id = interaction.guild.id if interaction.guild else None
 
-    chosen_file_name: Optional[str] = None
-    cookie_content: Optional[str] = None
-    tmp_path: Optional[str] = None
+    exclude_names: Set[str] = set()
+    attempt = 0
+    deadline = time.monotonic() + CREATE_LINK_BUDGET_SECONDS
+    last_info: Optional[Dict[str, Any]] = None
+    last_chosen: Optional[str] = None
+    saw_timeout = False
 
-    if COOKIES_GITHUB_REPO and COOKIES_GITHUB_PATH is not None:
-        base_path = (COOKIES_GITHUB_PATH.rstrip("/") + "/" + quality_folder) if COOKIES_GITHUB_PATH else quality_folder
-        github_names = await asyncio.to_thread(_fetch_github_cookie_list_in_path, base_path)
-        if github_names:
-            chosen_file_name = await asyncio.to_thread(pick_github_cookie_rotation, github_names)
-            cookie_content = await asyncio.to_thread(_fetch_github_cookie_content_in_path, base_path, chosen_file_name)
-            if cookie_content is None:
-                chosen_file_name = None
-
-    if cookie_content is None:
-        local_dir = COOKIES_FOLDER / quality_folder
-        if not local_dir.exists():
-            local_dir = COOKIES_FOLDER
-        if not local_dir.exists():
-            await interaction.edit_original_response(content=t["no_cookies_folder"])
-            await log_user_activity(interaction, "Error", "Cookies folder missing", language=lang, device=device)
-            return
-        txt_files = list(local_dir.glob("*.txt"))
-        if not txt_files:
-            await interaction.edit_original_response(content=t["no_cookie_files"])
-            await log_user_activity(interaction, "Error", "No cookie files", language=lang, device=device)
-            return
-        chosen_path = pick_cookie_file(txt_files)
-        chosen_file_name = chosen_path.name
+    while time.monotonic() < deadline:
+        attempt += 1
+        status_msg = t["progress"] if attempt == 1 else t["retry_status"].format(attempt=attempt)
         try:
-            cookie_content = chosen_path.read_text(encoding="utf-8")
-        except Exception as exc:
-            log.error(f"Failed to read local cookie: {exc}")
-            await interaction.edit_original_response(content=t["unexpected_error"])
-            return
-
-    try:
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False, encoding="utf-8") as tmp:
-            tmp.write(cookie_content)
-            tmp_path = tmp.name
-    except Exception as exc:
-        log.error(f"Failed to write temp cookie file: {exc}")
-        await interaction.edit_original_response(content=t["unexpected_error"])
-        return
-
-    try:
-        link, info = await asyncio.wait_for(
-            asyncio.to_thread(check_cookie_file, tmp_path, device),
-            timeout=SCRIPT_TIMEOUT,
-        )
-    except asyncio.TimeoutError:
-        await interaction.edit_original_response(content=t["timeout"])
-        await log_user_activity(
-            interaction, "Timeout", "Validation timeout",
-            used_txt_files=[chosen_file_name], language=lang, quality=quality_key, device=device,
-        )
-        return
-    except Exception as exc:
-        log.error(f"Checker error: {exc}")
-        await interaction.edit_original_response(content=t["unexpected_error"])
-        await log_user_activity(
-            interaction, "Error", f"Exception: {str(exc)[:80]}",
-            used_txt_files=[chosen_file_name], language=lang, quality=quality_key, device=device,
-        )
-        return
-    finally:
-        if tmp_path:
-            try:
-                os.unlink(tmp_path)
-            except Exception:
-                pass
-
-    if link and info:
-        channel = interaction.channel
-        command_message = None
-        try:
-            async for msg in channel.history(limit=10):
-                if (msg.author == interaction.client.user
-                        and msg.interaction_metadata
-                        and msg.interaction_metadata.id == interaction.id):
-                    command_message = msg
-                    break
+            await interaction.edit_original_response(content=status_msg, embed=None, view=None)
         except Exception:
             pass
 
-        embed = discord.Embed(
-            title=t["success_title"],
-            color=NETFLIX_RED,
-            timestamp=datetime.now(),
-        )
-        embed.set_thumbnail(url=NETFLIX_LOGO)
+        chosen_file_name, cookie_content = await _pick_cookie_candidate(quality_folder, exclude_names)
+        if cookie_content is None:
+            if chosen_file_name:
+                exclude_names.add(chosen_file_name)
+                continue
+            if attempt == 1:
+                local_dir = COOKIES_FOLDER / quality_folder
+                if not local_dir.exists() and not (COOKIES_GITHUB_REPO and COOKIES_GITHUB_PATH is not None):
+                    await interaction.edit_original_response(content=t["no_cookies_folder"])
+                    await log_user_activity(interaction, "Error", "Cookies folder missing", language=lang, device=device)
+                    return
+                await interaction.edit_original_response(content=t["no_cookie_files"])
+                await log_user_activity(interaction, "Error", "No cookie files", language=lang, device=device)
+                return
+            break
 
-        field_map = {
-            "👤 Name": info.get("name", "N/A"),
-            "✉️ Email": info.get("email", "N/A"),
-            "🌍 Country": info.get("country", "N/A"),
-            "🎁 Plan": info.get("plan", "N/A"),
-            "💰 Plan Price": info.get("plan_price", "N/A"),
-            "📺 Max Streams": info.get("max_streams", "N/A"),
-            "📅 Member Since": info.get("member_since", "N/A"),
-            "🔄 Next Billing": info.get("next_billing", "N/A"),
-            "📊 Quality": info.get("quality", "N/A"),
-            "💳 Payment": info.get("payment", "N/A"),
-            "🏧 Card": info.get("card", "N/A"),
-            "📱 Phone": info.get("phone", "N/A"),
-            "⏸️ Days Left": info.get("days_left", "N/A"),
-            "🎫 Membership": info.get("membership_status", "N/A"),
-            "👤 Profiles": info.get("profiles", "N/A"),
-            "⏳ Expires at": info.get("expires_at", "N/A"),
-        }
+        last_chosen = chosen_file_name
+        tmp_path: Optional[str] = None
+        link = None
+        info = None
+        try:
+            with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False, encoding="utf-8") as tmp:
+                tmp.write(cookie_content)
+                tmp_path = tmp.name
 
-        for name, value in field_map.items():
-            if value and value != "N/A":
-                embed.add_field(name=name, value=f"`{value}`", inline=False)
+            try:
+                link, info = await asyncio.wait_for(
+                    asyncio.to_thread(check_cookie_file, tmp_path, device),
+                    timeout=SCRIPT_TIMEOUT,
+                )
+            except asyncio.TimeoutError:
+                saw_timeout = True
+                log.warning(f"Link generation timeout on attempt {attempt} ({chosen_file_name})")
+            except Exception as exc:
+                log.error(f"Checker error on attempt {attempt}: {exc}")
+        finally:
+            if tmp_path:
+                try:
+                    os.unlink(tmp_path)
+                except Exception:
+                    pass
 
-        embed.add_field(
-            name="🔗 Login Link",
-            value=f"Click the link below to log in automatically:\n{link}",
-            inline=False
-        )
-        embed.set_footer(text=t["footer"] + "  •  X2 Salah Utility 🎬")
-
-        await interaction.edit_original_response(content=None, embed=embed)
-        first_message = await interaction.original_response()
-
-        activity_timestamp = datetime.now(EGYPT_TZ).strftime("%Y-%m-%d %H:%M:%S")
-
-        status_label = "✅ Success"
-        result_label = "Link generated"
-        used_files = [chosen_file_name] if chosen_file_name else []
-        asyncio.create_task(
-            send_user_activity_to_log_channel(
-                interaction,
-                info,
-                quality_key,
-                device,
-                status_label,
-                result_label,
-                used_files,
-                language,
-                activity_timestamp
+        if link and info:
+            await _send_success_link_response(
+                interaction, language, quality_key, device,
+                link, info, chosen_file_name, lang_message, confirm_message,
             )
-        )
+            return
 
-        asyncio.create_task(
-            log_user_activity(
-                interaction, "✅ Success", "Link generated",
-                used_txt_files=[chosen_file_name], language=lang, quality=quality_key, device=device,
-                plan=info.get("plan", "N/A"),
-                days_left=info.get("days_left", "N/A"),
-                timestamp=activity_timestamp
-            )
-        )
-
-        asyncio.create_task(cleanup_messages(
-            channel=channel,
-            command_message=command_message,
-            original_response=first_message,
-            followup_message=None,
-            lang_message=lang_message,
-            confirm_message=confirm_message,
-            delay_seconds=CLEANUP_DELAY_SECONDS,
-        ))
-
-        if interaction.guild:
-            asyncio.create_task(_refresh_stats_message(interaction.guild.id))
-    else:
-        if info:
-            error_msg = t["account_inactive"]
-        else:
-            error_msg = t["validation_failed"]
-
+        last_info = info
         if chosen_file_name:
-            guild_id = interaction.guild.id if interaction.guild else None
-            asyncio.create_task(_delete_and_refresh(quality_folder, chosen_file_name, guild_id))
-            log.info(f"Scheduled deletion of failed cookie: {quality_folder}/{chosen_file_name} with stock refresh")
+            exclude_names.add(chosen_file_name)
+            await _delete_failed_cookie(quality_folder, chosen_file_name)
+            log.info(
+                f"Auto-retry: removed failed cookie {quality_folder}/{chosen_file_name} "
+                f"(attempt {attempt})"
+            )
+            if guild_id:
+                asyncio.create_task(_refresh_stats_message(guild_id))
 
-        retry_view = RetryView(interaction, lang)
-        await interaction.edit_original_response(content=error_msg, view=retry_view)
-        await log_user_activity(
-            interaction,
-            t["failure"],
-            error_msg,
-            used_txt_files=[chosen_file_name],
-            language=lang,
-            quality=quality_key,
-            device=device,
-        )
-        return
+    if last_info:
+        error_msg = t["account_inactive"]
+    elif saw_timeout and not exclude_names:
+        error_msg = t["timeout"]
+    else:
+        error_msg = t["validation_failed"]
+
+    retry_view = RetryView(interaction, lang)
+    await interaction.edit_original_response(content=error_msg, view=retry_view)
+    await log_user_activity(
+        interaction,
+        t["failure"],
+        error_msg,
+        used_txt_files=[last_chosen] if last_chosen else [],
+        language=lang,
+        quality=quality_key,
+        device=device,
+    )
+
 
 class RetryView(discord.ui.View):
     def __init__(self, original_interaction: discord.Interaction, language: str) -> None:
