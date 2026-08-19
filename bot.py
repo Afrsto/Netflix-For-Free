@@ -2361,7 +2361,7 @@ async def _generate_and_send_link(
             else:
                 log.info(
                     f"Soft-excluding {quality_folder}/{chosen_file_name} "
-                    f"(likely token flake; file kept, attempt {attempt})"
+                    f"(token API failed, file kept, attempt {attempt})"
                 )
 
     if last_info and _cookie_info_is_confirmed_inactive(last_info):
