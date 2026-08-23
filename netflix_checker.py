@@ -95,9 +95,9 @@ NETFLIX_COOKIE_NAMES = {
 
 LOGIN_DEVICES = ("pc", "phone", "tv")
 LOGIN_LINK_TEMPLATES = {
-    "pc": "https://www.netflix.com/?nftoken={token}",
-    "phone": "https://www.netflix.com/unsupported?nftoken={token}",
-    "tv": "https://www.netflix.com/tv2?nftoken={token}",
+    "pc": "https://netflix.com/browse?nftoken={token}",
+    "phone": "https://netflix.com/unsupported?nftoken={token}",
+    "tv": "https://netflix.com/tv2?nftoken={token}",
 }
 
 AUTH_COOKIE_KEYS = ("NetflixId", "SecureNetflixId", "nfvdid", "OptanonConsent")
