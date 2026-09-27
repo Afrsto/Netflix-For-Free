@@ -41,7 +41,7 @@ from netflix_checker import (
 )
 
 BOT_VERSION = "v1.0.0"
-NETFLIX_BANNER_GIF = "https://i.postimg.cc/Xq0kFFCF/NETFLIX-Red-Matrix.gif"
+NETFLIX_BANNER_GIF = "https://cdn.discordapp.com/attachments/1515490244353458227/1553898291001823313/NETFLIX_Red_Matrix.gif"
 GET_KEY_URL = "https://linkjust.com/"
 
 DISCORD_BOT_TOKEN = os.environ.get("DISCORD_TOKEN", "").strip()
@@ -1254,9 +1254,9 @@ async def _build_main_embed() -> discord.Embed:
         title="🎬 Netflix Checker | X2 Salah Utility",
         description=(
             f"🍪 **Alive cookies** — `{total}`\n"
-            f"⭐ **Premium:** `{premium_count}`   "
-            f"⭐ **Standard:** `{standard_count}`   "
-            f"⭐ **Basic:** `{basic_count}`\n"
+            f"💎 **Ultra HD 4K — Premium:** `{premium_count}`   "
+            f"🎬  **Full HD 1080p — Standard:** `{standard_count}`   "
+            f"📺 **HD 720p — Basic:** `{basic_count}`\n"
             f"🏷️ **Version:** `{BOT_VERSION}`    •    🟢 **Status:** Online"
         ),
         color=NETFLIX_RED,
