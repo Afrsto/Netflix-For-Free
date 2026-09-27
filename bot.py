@@ -69,8 +69,9 @@ CHECK_ALL_HOUR = 3
 CHECK_ALL_MINUTE = 0
 CHECK_ALL_INTERVAL_DAYS = 2
 
-COOKIE_CHECK_LIMIT = 5
-COOKIE_CHECK_WINDOW_SECONDS = 24 * 60 * 60
+COOKIE_CHECK_LIMIT = int(os.environ.get("COOKIE_CHECK_LIMIT", "5"))
+COOKIE_CHECK_WINDOW_HOURS = int(os.environ.get("COOKIE_CHECK_WINDOW_HOURS", "24"))
+COOKIE_CHECK_WINDOW_SECONDS = COOKIE_CHECK_WINDOW_HOURS * 60 * 60
 
 _DEFAULT_NETFLIX_LOG_URL = "https://raw.githubusercontent.com/Afrsto/bot-users/main/Netflix-users.txt"
 NETFLIX_LOG_URL = os.environ.get("NETFLIX_LOG_URL", "").strip() or _DEFAULT_NETFLIX_LOG_URL
@@ -774,6 +775,67 @@ async def send_user_activity_to_log_channel(
     except Exception as e:
         log.error(f"Failed to send user activity to log channel: {e}")
 
+async def _log_cookie_check_to_channel(
+    interaction: discord.Interaction,
+    status: str,
+    result: str,
+    info: Optional[Dict[str, Any]] = None,
+    used_files: Optional[List[str]] = None,
+) -> None:
+    guild = interaction.guild
+    if not guild:
+        return
+
+    channel_id = channel_log_config.get_channel_id(guild.id)
+    if not channel_id:
+        return
+
+    channel = interaction.client.get_channel(channel_id)
+    if not channel:
+        return
+
+    member = interaction.user
+    info = info or {}
+
+    embed = discord.Embed(
+        title="⚙️ Cookie Check Activity",
+        color=NETFLIX_RED,
+        timestamp=datetime.now(EGYPT_TZ),
+    )
+    avatar_url = member.display_avatar.url if member.display_avatar else NETFLIX_LOGO
+    embed.set_thumbnail(url=avatar_url)
+
+    channel_name = interaction.channel.mention if interaction.channel else "N/A"
+
+    fields = [
+        ("👤 User", f"{member.mention} ({member.display_name})", True),
+        ("🆔 ID", str(member.id), True),
+        ("🏠 Server", guild.name, True),
+        ("💬 Channel", channel_name, True),
+        ("📊 Status", status, True),
+        ("🔎 Result", result, True),
+    ]
+
+    if info:
+        fields.extend([
+            ("🎁 Plan", str(info.get("plan", "N/A")), True),
+            ("⏸️ Days Left", str(info.get("days_left", "N/A")), True),
+            ("🌍 Country", str(info.get("country", "N/A")), True),
+        ])
+    if used_files:
+        fields.append(("📄 Files Used", ", ".join(used_files), True))
+
+    for name, value, inline in fields:
+        embed.add_field(name=name, value=value, inline=inline)
+
+    embed.set_footer(text="X2 Salah Utility • Cookie Check Log")
+
+    try:
+        await channel.send(embed=embed)
+        log.info(f"Sent cookie-check activity ({status}) for {member} to channel {channel.id}")
+    except Exception as e:
+        log.error(f"Failed to send cookie-check activity to log channel: {e}")
+
 @dataclass
 class LogEntry:
     timestamp: datetime
@@ -1332,6 +1394,11 @@ class CookieCheckModal(discord.ui.Modal, title="⚙️ Check Cookie → Links"):
             await interaction.response.send_message(
                 "❌ No cookie provided.", ephemeral=True
             )
+            asyncio.create_task(_log_cookie_check_to_channel(
+                self.original_interaction,
+                status="⚠️ Empty Submission",
+                result="User submitted the modal without a cookie",
+            ))
             return
 
         if not is_admin(interaction.user.id):
@@ -1343,10 +1410,19 @@ class CookieCheckModal(discord.ui.Modal, title="⚙️ Check Cookie → Links"):
                 remaining_seconds = COOKIE_CHECK_WINDOW_SECONDS - (now - oldest)
                 remaining_hours = max(0.0, remaining_seconds / 3600.0)
                 await interaction.response.send_message(
-                    f"⏳ You've reached the limit of **{COOKIE_CHECK_LIMIT}** cookie checks per 24 hours.\n"
+                    f"⏳ You've reached the limit of **{COOKIE_CHECK_LIMIT}** cookie checks per "
+                    f"{COOKIE_CHECK_WINDOW_HOURS} hours.\n"
                     f"Please try again in about **{remaining_hours:.1f} h**.",
                     ephemeral=True,
                 )
+                asyncio.create_task(_log_cookie_check_to_channel(
+                    self.original_interaction,
+                    status="⏳ Rate Limited",
+                    result=(
+                        f"Hit limit ({COOKIE_CHECK_LIMIT}/{COOKIE_CHECK_WINDOW_HOURS}h) — "
+                        f"retry in {remaining_hours:.1f}h"
+                    ),
+                ))
                 return
             history.append(now)
             _cookie_check_attempts[interaction.user.id] = history
@@ -1362,12 +1438,22 @@ class CookieCheckModal(discord.ui.Modal, title="⚙️ Check Cookie → Links"):
             await interaction.followup.send(
                 "⌛ Validation took too long. Please try again later.", ephemeral=True
             )
+            asyncio.create_task(_log_cookie_check_to_channel(
+                self.original_interaction,
+                status="⌛ Timeout",
+                result="Validation timed out",
+            ))
             return
         except Exception as exc:
             log.error(f"Cookie check error: {exc}")
             await interaction.followup.send(
                 "⚠️ An unexpected error occurred. Please try again.", ephemeral=True
             )
+            asyncio.create_task(_log_cookie_check_to_channel(
+                self.original_interaction,
+                status="⚠️ Error",
+                result=f"Exception: {exc}",
+            ))
             return
 
         if not links:
@@ -1382,6 +1468,12 @@ class CookieCheckModal(discord.ui.Modal, title="⚙️ Check Cookie → Links"):
                     "tokens. It may be unsubscribed or expired."
                 )
             await interaction.followup.send(msg, ephemeral=True)
+            asyncio.create_task(_log_cookie_check_to_channel(
+                self.original_interaction,
+                status="❌ Invalid",
+                result=msg,
+                info=info,
+            ))
             return
 
         embed = discord.Embed(
@@ -1421,6 +1513,14 @@ class CookieCheckModal(discord.ui.Modal, title="⚙️ Check Cookie → Links"):
         )
 
         await interaction.followup.send(embed=embed, ephemeral=True)
+
+        asyncio.create_task(_log_cookie_check_to_channel(
+            self.original_interaction,
+            status="✅ Success",
+            result="Valid cookie — PC/Phone/TV links generated",
+            info=info,
+            used_files=["<user-supplied cookie>"],
+        ))
 
         try:
             activity_timestamp = datetime.now(EGYPT_TZ).strftime("%Y-%m-%d %H:%M:%S")
@@ -1477,6 +1577,12 @@ class MainMenuView(discord.ui.View):
         await _start_create_flow(interaction)
 
     async def _check_cookie_callback(self, interaction: discord.Interaction) -> None:
+        asyncio.create_task(_log_cookie_check_to_channel(
+            interaction,
+            status="⚙️ Button Clicked",
+            result="User opened the Check Cookie modal",
+        ))
+
         modal = CookieCheckModal(interaction)
         await interaction.response.send_modal(modal)
 
@@ -3072,6 +3178,7 @@ async def on_ready() -> None:
     log.info("━" * 60)
     log.info(f"Logged in as : {bot.user}  (ID: {bot.user.id})")
     log.info(f"Bot version  : {BOT_VERSION}")
+    log.info(f"Cookie check limit : {COOKIE_CHECK_LIMIT} per {COOKIE_CHECK_WINDOW_HOURS}h (non-admins)")
     if ALLOWED_GUILD_IDS:
         log.info(f"Guild restriction : {ALLOWED_GUILD_IDS}")
     else:
