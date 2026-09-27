@@ -44,6 +44,9 @@ BOT_VERSION = "v1.0.0"
 NETFLIX_BANNER_GIF = "https://cdn.discordapp.com/attachments/1515490244353458227/1553898291001823313/NETFLIX_Red_Matrix.gif"
 GET_KEY_URL = "https://linkjust.com/"
 
+DISCORD_USER_URL = "https://discord.com/users/994817247061225633"
+DISCORD_SERVER_URL = "https://discord.gg/btRCeujadA"
+
 DISCORD_BOT_TOKEN = os.environ.get("DISCORD_TOKEN", "").strip()
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "").strip()
 
@@ -1250,15 +1253,23 @@ async def _build_main_embed() -> discord.Embed:
     )
     total = premium_count + standard_count + basic_count
 
+    description = (
+        f"🍪 **Alive cookies** — `{total}`\n"
+        f"💎 **2160p Premium:** `{premium_count}`   "
+        f"🎬  **1080p Standard:** `{standard_count}`   "
+        f"📺 **720p Basic:** `{basic_count}`\n"
+        f"🏷️ **Version:** `{BOT_VERSION}`    •    🟢 **Status:** Online\n"
+        f"\n"
+        f"**Discord**\n"
+        f"`{DISCORD_USER_URL}`\n"
+        f"\n"
+        f"**Discord Server**\n"
+        f"`{DISCORD_SERVER_URL}`"
+    )
+
     embed = discord.Embed(
         title="🎬 Netflix Checker | X2 Salah Utility",
-        description=(
-            f"🍪 **Alive cookies** — `{total}`\n"
-            f"💎 **2160p-Premium:** `{premium_count}`   "
-            f"🎬  **1080p Standard:** `{standard_count}`   "
-            f"📺 **720p Basic:** `{basic_count}`\n"
-            f"🏷️ **Version:** `{BOT_VERSION}`    •    🟢 **Status:** Online"
-        ),
+        description=description,
         color=NETFLIX_RED,
         timestamp=datetime.now(EGYPT_TZ),
     )
