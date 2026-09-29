@@ -1796,14 +1796,24 @@ class MainMenuView(discord.ui.View):
     async def _check_cookie_callback(self, interaction: discord.Interaction) -> None:
         _arm_timeout_watchdog(interaction)
         try:
+            modal = CookieCheckModal(interaction)
+            await interaction.response.send_modal(modal)
+
             asyncio.create_task(_log_cookie_check_to_channel(
                 interaction,
                 status="⚙️ Button Clicked",
                 result="User opened the Check Cookie modal",
             ))
-
-            modal = CookieCheckModal(interaction)
-            await interaction.response.send_modal(modal)
+        except Exception as exc:
+            log.error(f"Failed to open cookie-check modal: {exc}")
+            try:
+                if not interaction.response.is_done():
+                    await interaction.response.send_message(
+                        "⚠️ Could not open the cookie-check form. Please try again.",
+                        ephemeral=True,
+                    )
+            except Exception:
+                pass
         finally:
             _disarm_timeout_watchdog(interaction)
 
@@ -1811,17 +1821,25 @@ class MainMenuView(discord.ui.View):
 async def _start_create_flow(interaction: discord.Interaction) -> None:
     user_lang = get_user_lang(interaction)
 
+    try:
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True, thinking=False)
+    except (discord.InteractionResponded, discord.NotFound):
+        pass
+    except Exception as exc:
+        log.debug(f"defer() in _start_create_flow failed (non-fatal): {exc}")
+
     if not is_allowed_channel(interaction):
         guild_id = interaction.guild.id if interaction.guild else None
         channel_id = config.get_channel_for_guild(guild_id) if guild_id else None
         if channel_id is None:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 TRANSLATIONS[user_lang]["wrong_channel_no_config"], ephemeral=True
             )
         else:
             allowed_channel = bot.get_channel(channel_id)
             mention = allowed_channel.mention if allowed_channel else "the designated channel"
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 TRANSLATIONS[user_lang]["wrong_channel_with_config"].format(channel=mention),
                 ephemeral=True,
             )
@@ -1833,7 +1851,7 @@ async def _start_create_flow(interaction: discord.Interaction) -> None:
         hours_left = total_minutes // 60
         minutes_left = total_minutes % 60
         msg = TRANSLATIONS[user_lang]["cooldown"].format(hours=hours_left, minutes=minutes_left)
-        await interaction.response.send_message(msg, ephemeral=True)
+        await interaction.followup.send(msg, ephemeral=True)
         log.info(
             f"Cooldown: {interaction.user} (ID: {interaction.user.id}) "
             f"blocked – {hours_left}h {minutes_left}m remaining"
@@ -1841,7 +1859,7 @@ async def _start_create_flow(interaction: discord.Interaction) -> None:
         return
 
     view = LanguageSelectView(interaction)
-    await interaction.response.send_message(
+    await interaction.followup.send(
         TRANSLATIONS["ar"]["lang_prompt"], view=view, ephemeral=True
     )
 
@@ -2656,8 +2674,16 @@ async def _send_success_link_response(
     )
     embed.set_footer(text=t["footer"] + "  •  X2 Salah Utility 🎬")
 
-    await interaction.edit_original_response(content=None, embed=embed, view=None)
-    first_message = await interaction.original_response()
+    try:
+        await interaction.edit_original_response(content=None, embed=embed, view=None)
+        first_message = await interaction.original_response()
+    except (discord.NotFound, discord.HTTPException) as exc:
+        log.warning(f"edit_original_response failed ({exc}); sending success as followup")
+        try:
+            first_message = await interaction.followup.send(embed=embed)
+        except Exception as exc2:
+            log.error(f"Could not deliver success embed: {exc2}")
+            return
 
     asyncio.create_task(mark_self_online("login link generated"))
 
@@ -2877,7 +2903,13 @@ async def _generate_and_send_link(
         error_msg = t["validation_failed"]
 
     retry_view = RetryView(interaction, lang)
-    await interaction.edit_original_response(content=error_msg, view=retry_view)
+    try:
+        await interaction.edit_original_response(content=error_msg, view=retry_view)
+    except (discord.NotFound, discord.HTTPException):
+        try:
+            await interaction.followup.send(content=error_msg, view=retry_view, ephemeral=True)
+        except Exception:
+            pass
     await log_user_activity(
         interaction,
         t["failure"],
