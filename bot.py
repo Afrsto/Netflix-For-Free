@@ -89,6 +89,89 @@ logging.basicConfig(
 )
 log = logging.getLogger("NetflixBot")
 
+_bot_offline_until: Optional[float] = None
+_bot_offline_reason: str = ""
+_last_online_state: Optional[bool] = None
+BOT_OFFLINE_HOLD_SECONDS = 120
+_response_watcher_tasks: Set[asyncio.Task] = set()
+
+
+def _mark_bot_offline(reason: str) -> None:
+    global _bot_offline_until, _bot_offline_reason
+    _bot_offline_until = time.time() + BOT_OFFLINE_HOLD_SECONDS
+    _bot_offline_reason = reason
+    log.warning(f"🔴 Bot marked OFFLINE: {reason}")
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(_refresh_all_main_messages())
+    except RuntimeError:
+        pass
+
+
+def _is_bot_online() -> bool:
+    if _bot_offline_until is None:
+        return True
+    return time.time() < _bot_offline_until
+
+
+async def _refresh_all_main_messages() -> None:
+    try:
+        guild_ids = ALLOWED_GUILD_IDS if ALLOWED_GUILD_IDS else [g.id for g in bot.guilds]
+    except Exception:
+        return
+    for gid in guild_ids:
+        try:
+            await _refresh_stats_message(gid)
+        except Exception as exc:
+            log.debug(f"Status refresh failed for guild {gid}: {exc}")
+
+
+async def _watch_interaction_response(interaction: discord.Interaction) -> None:
+    try:
+        for _ in range(30):
+            await asyncio.sleep(0.1)
+            try:
+                if interaction.response.is_done():
+                    return
+            except Exception:
+                return
+        cmd_name = getattr(getattr(interaction, "command", None), "name", "?")
+        _mark_bot_offline(
+            f"Interaction /{cmd_name} not acknowledged within 3s "
+            f"(Discord will show 'The application didn't respond in time')"
+        )
+    except asyncio.CancelledError:
+        pass
+    except Exception as exc:
+        log.debug(f"Interaction response watcher error: {exc}")
+
+
+def _spawn_response_watcher(interaction: discord.Interaction) -> None:
+    try:
+        task = asyncio.create_task(_watch_interaction_response(interaction))
+    except RuntimeError:
+        return
+    _response_watcher_tasks.add(task)
+    task.add_done_callback(_response_watcher_tasks.discard)
+
+
+async def _health_monitor_loop() -> None:
+    global _last_online_state
+    await bot.wait_until_ready()
+    while True:
+        try:
+            current_online = _is_bot_online()
+            if _last_online_state is not None and current_online != _last_online_state:
+                log.info(
+                    f"🔄 Bot status changed → "
+                    f"{'Online' if current_online else 'Offline'} – refreshing main message"
+                )
+                await _refresh_all_main_messages()
+            _last_online_state = current_online
+        except Exception as exc:
+            log.error(f"Health monitor error: {exc}")
+        await asyncio.sleep(5)
+
 ALLOWED_GUILD_IDS: List[int] = []
 for key, val in os.environ.items():
     if key.startswith("GUILD_ID_") and val and val.strip().isdigit():
@@ -1315,12 +1398,16 @@ async def _build_main_embed() -> discord.Embed:
     )
     total = premium_count + standard_count + basic_count
 
+    online = _is_bot_online()
+    status_emoji = "🟢" if online else "🔴"
+    status_text = "Online" if online else "Offline"
+
     description = (
         f"🍪 **Alive cookies** — `{total}`\n"
         f"💎 **2160p Premium:** `{premium_count}`   "
         f"🎬  **1080p Standard:** `{standard_count}`   "
         f"📺 **720p Basic:** `{basic_count}`\n"
-        f"🏷️ **Version:** `{BOT_VERSION}`    •    🟢 **Status:** Online\n"
+        f"🏷️ **Version:** `{BOT_VERSION}`    •    {status_emoji} **Status:** {status_text}\n"
         f"\n"
         f"**Discord**\n"
         f"`{DISCORD_USER_URL}`\n"
@@ -1588,31 +1675,40 @@ class MainMenuView(discord.ui.View):
 
 
 async def _start_create_flow(interaction: discord.Interaction) -> None:
+    try:
+        await interaction.response.defer(ephemeral=True, thinking=True)
+    except discord.InteractionResponded:
+        pass
+
     user_lang = get_user_lang(interaction)
 
     if not is_allowed_channel(interaction):
         guild_id = interaction.guild.id if interaction.guild else None
         channel_id = config.get_channel_for_guild(guild_id) if guild_id else None
         if channel_id is None:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 TRANSLATIONS[user_lang]["wrong_channel_no_config"], ephemeral=True
             )
         else:
             allowed_channel = bot.get_channel(channel_id)
             mention = allowed_channel.mention if allowed_channel else "the designated channel"
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 TRANSLATIONS[user_lang]["wrong_channel_with_config"].format(channel=mention),
                 ephemeral=True,
             )
         return
 
-    on_cooldown, remaining_hours = await asyncio.to_thread(check_user_cooldown, interaction.user.id)
+    on_cooldown, remaining_hours = await asyncio.to_thread(
+        check_user_cooldown, interaction.user.id
+    )
     if on_cooldown:
         total_minutes = int(remaining_hours * 60)
         hours_left = total_minutes // 60
         minutes_left = total_minutes % 60
-        msg = TRANSLATIONS[user_lang]["cooldown"].format(hours=hours_left, minutes=minutes_left)
-        await interaction.response.send_message(msg, ephemeral=True)
+        msg = TRANSLATIONS[user_lang]["cooldown"].format(
+            hours=hours_left, minutes=minutes_left
+        )
+        await interaction.followup.send(msg, ephemeral=True)
         log.info(
             f"Cooldown: {interaction.user} (ID: {interaction.user.id}) "
             f"blocked – {hours_left}h {minutes_left}m remaining"
@@ -1620,7 +1716,7 @@ async def _start_create_flow(interaction: discord.Interaction) -> None:
         return
 
     view = LanguageSelectView(interaction)
-    await interaction.response.send_message(
+    await interaction.followup.send(
         TRANSLATIONS["ar"]["lang_prompt"], view=view, ephemeral=True
     )
 
@@ -3138,6 +3234,8 @@ def _guild_allowed(guild_id: Optional[int]) -> bool:
     return guild_id in ALLOWED_GUILD_IDS
 
 async def global_interaction_check(interaction: discord.Interaction) -> bool:
+    _spawn_response_watcher(interaction)
+
     if is_user_banned(interaction.user.id):
         attempts = record_ban_attempt(interaction.user.id)
         lang = get_user_lang(interaction)
@@ -3232,6 +3330,7 @@ async def on_ready() -> None:
 
     monitor.start()
     check_all_scheduler.start()
+    asyncio.create_task(_health_monitor_loop())
 
     if ALLOWED_GUILD_IDS:
         for guild_id in ALLOWED_GUILD_IDS:
