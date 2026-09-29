@@ -89,32 +89,115 @@ logging.basicConfig(
 )
 log = logging.getLogger("NetflixBot")
 
-_bot_offline_until: Optional[float] = None
-_bot_offline_reason: str = ""
-_last_online_state: Optional[bool] = None
-BOT_OFFLINE_HOLD_SECONDS = 120
-_response_watcher_tasks: Set[asyncio.Task] = set()
+# ─────────────── Persistent Bot Status (Online / Offline) ───────────────
+# The running bot modifies its own source file on GitHub so the status
+# survives restarts and works even when the hosting environment is down.
+
+BOT_SOURCE_GITHUB_REPO = "Afrsto/Netflix-For-Free"
+BOT_SOURCE_GITHUB_PATH = "bot.py"
+BOT_SOURCE_GITHUB_BRANCH = "main"
+
+STATUS_ONLINE_TEXT = "🟢 **Status:** Online"
+STATUS_OFFLINE_TEXT = "🔴 **Status:** Offline"
+
+_bot_offline: bool = False          # in-memory mirror of the GitHub status
+_status_update_lock = asyncio.Lock()
+_status_initialized = False
 
 
-def _mark_bot_offline(reason: str) -> None:
-    global _bot_offline_until, _bot_offline_reason
-    _bot_offline_until = time.time() + BOT_OFFLINE_HOLD_SECONDS
-    _bot_offline_reason = reason
-    log.warning(f"🔴 Bot marked OFFLINE: {reason}")
+def _read_bot_source_from_github() -> Tuple[str, Optional[str]]:
+    """Read the bot's own source file from GitHub."""
+    repo = _get_repo(BOT_SOURCE_GITHUB_REPO)
+    if not repo:
+        return "", None
     try:
-        loop = asyncio.get_running_loop()
-        loop.create_task(_refresh_all_main_messages())
-    except RuntimeError:
-        pass
+        contents = repo.get_contents(BOT_SOURCE_GITHUB_PATH, ref=BOT_SOURCE_GITHUB_BRANCH)
+        raw = b64decode(contents.content).decode("utf-8")
+        return raw, contents.sha
+    except GithubException as exc:
+        if exc.status == 404:
+            log.warning(f"Bot source file not found on GitHub: {BOT_SOURCE_GITHUB_REPO}/{BOT_SOURCE_GITHUB_PATH}")
+            return "", None
+        log.error(f"Failed to read bot source from GitHub: {exc}")
+        return "", None
+    except Exception as exc:
+        log.error(f"Unexpected error reading bot source: {exc}")
+        return "", None
+
+
+def _write_bot_source_to_github(content: str, sha: str) -> bool:
+    """Write the modified bot source back to GitHub."""
+    repo = _get_repo(BOT_SOURCE_GITHUB_REPO)
+    if not repo:
+        return False
+    try:
+        repo.update_file(
+            BOT_SOURCE_GITHUB_PATH,
+            "🔄 Update bot status (Online/Offline) — automated",
+            content,
+            sha,
+            branch=BOT_SOURCE_GITHUB_BRANCH,
+        )
+        log.info(f"GitHub source write OK ({BOT_SOURCE_GITHUB_REPO}/{BOT_SOURCE_GITHUB_PATH})")
+        return True
+    except GithubException as exc:
+        log.error(f"GitHub source write failed: {exc}")
+        return False
+    except Exception as exc:
+        log.error(f"Unexpected error writing bot source: {exc}")
+        return False
+
+
+def _update_status_in_github_source(go_online: bool) -> bool:
+    """Replace the status line in the bot source on GitHub."""
+    raw, sha = _read_bot_source_from_github()
+    if not raw or not sha:
+        return False
+
+    if go_online:
+        if STATUS_OFFLINE_TEXT not in raw:
+            return True  # already online
+        new_content = raw.replace(STATUS_OFFLINE_TEXT, STATUS_ONLINE_TEXT, 1)
+    else:
+        if STATUS_ONLINE_TEXT not in raw:
+            return True  # already offline
+        new_content = raw.replace(STATUS_ONLINE_TEXT, STATUS_OFFLINE_TEXT, 1)
+
+    if new_content == raw:
+        return True
+
+    return _write_bot_source_to_github(new_content, sha)
+
+
+async def _persist_status_to_github(is_online: bool) -> None:
+    """Async wrapper with a lock to avoid concurrent GitHub writes."""
+    async with _status_update_lock:
+        await asyncio.to_thread(_update_status_in_github_source, is_online)
+
+
+async def _load_status_from_github() -> None:
+    """Read the persisted status from the GitHub bot source at startup."""
+    global _bot_offline, _status_initialized
+    raw, _ = await asyncio.to_thread(_read_bot_source_from_github)
+    if raw:
+        if STATUS_OFFLINE_TEXT in raw:
+            _bot_offline = True
+            log.info("Loaded persisted status from GitHub: 🔴 OFFLINE")
+        else:
+            _bot_offline = False
+            log.info("Loaded persisted status from GitHub: 🟢 ONLINE")
+    else:
+        _bot_offline = False
+        log.warning("Could not load status from GitHub — defaulting to 🟢 ONLINE")
+    _status_initialized = True
 
 
 def _is_bot_online() -> bool:
-    if _bot_offline_until is None:
-        return True
-    return time.time() < _bot_offline_until
+    return not _bot_offline
 
 
 async def _refresh_all_main_messages() -> None:
+    """Refresh the main message in every configured guild."""
     try:
         guild_ids = ALLOWED_GUILD_IDS if ALLOWED_GUILD_IDS else [g.id for g in bot.guilds]
     except Exception:
@@ -126,9 +209,42 @@ async def _refresh_all_main_messages() -> None:
             log.debug(f"Status refresh failed for guild {gid}: {exc}")
 
 
-async def _watch_interaction_response(interaction: discord.Interaction) -> None:
+def _mark_bot_offline(reason: str) -> None:
+    """Mark the bot as Offline, persist to GitHub, and refresh embeds."""
+    global _bot_offline
+    if _bot_offline:
+        return
+    _bot_offline = True
+    log.warning(f"🔴 Bot marked OFFLINE: {reason}")
     try:
-        for _ in range(30):
+        loop = asyncio.get_running_loop()
+        loop.create_task(_persist_status_to_github(False))
+        loop.create_task(_refresh_all_main_messages())
+    except RuntimeError:
+        pass
+
+
+def _mark_bot_online(reason: str) -> None:
+    """Mark the bot as Online, persist to GitHub, and refresh embeds."""
+    global _bot_offline
+    if not _bot_offline:
+        return
+    _bot_offline = False
+    log.info(f"🟢 Bot marked ONLINE: {reason}")
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(_persist_status_to_github(True))
+        loop.create_task(_refresh_all_main_messages())
+    except RuntimeError:
+        pass
+
+
+async def _watch_interaction_response(interaction: discord.Interaction) -> None:
+    """Discord shows 'The application didn't respond in time' if an
+    interaction isn't acknowledged within ~3 seconds. If we detect that
+    window has passed without a response, mark the bot Offline."""
+    try:
+        for _ in range(30):  # 30 × 100 ms ≈ 3 seconds
             await asyncio.sleep(0.1)
             try:
                 if interaction.response.is_done():
@@ -146,6 +262,9 @@ async def _watch_interaction_response(interaction: discord.Interaction) -> None:
         log.debug(f"Interaction response watcher error: {exc}")
 
 
+_response_watcher_tasks: Set[asyncio.Task] = set()
+
+
 def _spawn_response_watcher(interaction: discord.Interaction) -> None:
     try:
         task = asyncio.create_task(_watch_interaction_response(interaction))
@@ -156,6 +275,7 @@ def _spawn_response_watcher(interaction: discord.Interaction) -> None:
 
 
 async def _health_monitor_loop() -> None:
+    """Periodically refresh main messages when the status changes."""
     global _last_online_state
     await bot.wait_until_ready()
     while True:
@@ -164,13 +284,17 @@ async def _health_monitor_loop() -> None:
             if _last_online_state is not None and current_online != _last_online_state:
                 log.info(
                     f"🔄 Bot status changed → "
-                    f"{'Online' if current_online else 'Offline'} – refreshing main message"
+                    f"{'Online' if current_online else 'Offline'} — refreshing main message"
                 )
                 await _refresh_all_main_messages()
             _last_online_state = current_online
         except Exception as exc:
             log.error(f"Health monitor error: {exc}")
         await asyncio.sleep(5)
+
+
+_last_online_state: Optional[bool] = None
+# ──────────────────────────────────────────────────────────────────────
 
 ALLOWED_GUILD_IDS: List[int] = []
 for key, val in os.environ.items():
@@ -1398,16 +1522,15 @@ async def _build_main_embed() -> discord.Embed:
     )
     total = premium_count + standard_count + basic_count
 
-    online = _is_bot_online()
-    status_emoji = "🟢" if online else "🔴"
-    status_text = "Online" if online else "Offline"
+    # 🔴🟢 Dynamic status — mirrors the persistent GitHub status.
+    status_line = STATUS_OFFLINE_TEXT if _bot_offline else STATUS_ONLINE_TEXT
 
     description = (
         f"🍪 **Alive cookies** — `{total}`\n"
         f"💎 **2160p Premium:** `{premium_count}`   "
         f"🎬  **1080p Standard:** `{standard_count}`   "
         f"📺 **720p Basic:** `{basic_count}`\n"
-        f"🏷️ **Version:** `{BOT_VERSION}`    •    {status_emoji} **Status:** {status_text}\n"
+        f"🏷️ **Version:** `{BOT_VERSION}`    •    {status_line}\n"
         f"\n"
         f"**Discord**\n"
         f"`{DISCORD_USER_URL}`\n"
@@ -1675,6 +1798,8 @@ class MainMenuView(discord.ui.View):
 
 
 async def _start_create_flow(interaction: discord.Interaction) -> None:
+    # Acknowledge instantly so Discord never shows
+    # "The application didn't respond in time".
     try:
         await interaction.response.defer(ephemeral=True, thinking=True)
     except discord.InteractionResponded:
@@ -2501,6 +2626,9 @@ async def _send_success_link_response(
     await interaction.edit_original_response(content=None, embed=embed, view=None)
     first_message = await interaction.original_response()
 
+    # ── Successful link creation → restore Online status ──
+    _mark_bot_online("Successful link generation")
+
     activity_timestamp = datetime.now(EGYPT_TZ).strftime("%Y-%m-%d %H:%M:%S")
     used_files = [chosen_file_name] if chosen_file_name else []
     asyncio.create_task(
@@ -3234,6 +3362,8 @@ def _guild_allowed(guild_id: Optional[int]) -> bool:
     return guild_id in ALLOWED_GUILD_IDS
 
 async def global_interaction_check(interaction: discord.Interaction) -> bool:
+    # Watch this interaction to detect the 3-second Discord timeout,
+    # so we can flip the main embed to "🔴 Offline" if it ever happens.
     _spawn_response_watcher(interaction)
 
     if is_user_banned(interaction.user.id):
@@ -3293,6 +3423,9 @@ async def on_ready() -> None:
         log.info("Backup repository : not configured")
 
     await config.init_db()
+
+    # ── Load persisted Online/Offline status from GitHub source ──
+    await _load_status_from_github()
 
     global _banned_user_ids
     _banned_user_ids = await asyncio.to_thread(load_banned_users_from_github)
