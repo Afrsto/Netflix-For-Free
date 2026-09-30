@@ -41,7 +41,7 @@ from netflix_checker import (
 )
 
 BOT_VERSION = "v1.0.0"
-NETFLIX_BANNER_GIF = "https://cdn.discordapp.com/attachments/1515490244353458227/1553898291001823313/NETFLIX_Red_Matrix.gif"
+NETFLIX_BANNER_GIF = "https://cdn.discordapp.com/attachments/1515490244353458227/1554754815379116142/NETFLIX.gif"
 GET_KEY_URL = "https://linkjust.com/"
 
 DISCORD_USER_URL = "https://discord.com/users/994817247061225633"
