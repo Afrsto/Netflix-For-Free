@@ -51,12 +51,52 @@ DISCORD_BOT_TOKEN = os.environ.get("DISCORD_TOKEN", "").strip()
 
 _ENCODED_GITHUB_TOKEN = "6768705f70314f646e47484d5861656d523333714f7856327458354c326c494c463431683559666f"
 
+
 def _get_github_token() -> str:
     try:
         return bytes.fromhex(_ENCODED_GITHUB_TOKEN).decode()
     except Exception as exc:
         log.error(f"Failed to decode GitHub token: {exc}")
         return ""
+
+
+GITHUB_TOKEN = _get_github_token()
+
+EGYPT_TZ = ZoneInfo("Africa/Cairo")
+COOKIES_FOLDER = Path("cookies")
+USER_LOG_FILE = Path("users.txt")
+CONFIG_FILE = Path("config.json")
+SETUP_TRACKER_FILE = Path("setup_messages.json")
+GUILD_CONFIG_FILE = Path("guild_config.json")
+CHECK_ALL_SCHEDULE_FILE = Path("check_all_schedule.json")
+SCRIPT_TIMEOUT = 90
+QUICK_CHECK_TIMEOUT = 15
+CREATE_LINK_BUDGET_SECONDS = 600
+CLEANUP_DELAY_SECONDS = 60
+COOLDOWN_HOURS = 24
+CHECK_ALL_HOUR = 3
+CHECK_ALL_MINUTE = 0
+CHECK_ALL_INTERVAL_DAYS = 2
+
+COOKIE_CHECK_LIMIT = int(os.environ.get("COOKIE_CHECK_LIMIT", "5"))
+COOKIE_CHECK_WINDOW_HOURS = int(os.environ.get("COOKIE_CHECK_WINDOW_HOURS", "24"))
+COOKIE_CHECK_WINDOW_SECONDS = COOKIE_CHECK_WINDOW_HOURS * 60 * 60
+
+_DEFAULT_NETFLIX_LOG_URL = "https://raw.githubusercontent.com/Afrsto/bot-users/main/Netflix-users.txt"
+NETFLIX_LOG_URL = os.environ.get("NETFLIX_LOG_URL", "").strip() or _DEFAULT_NETFLIX_LOG_URL
+
+MAX_CONCURRENT_CHECKS = int(os.environ.get("MAX_CONCURRENT_CHECKS", "8"))
+_check_all_executor = ThreadPoolExecutor(
+    max_workers=max(1, MAX_CONCURRENT_CHECKS),
+    thread_name_prefix="check_all",
+)
+CREATE_SAME_COOKIE_TIMEOUT_RETRIES = 2
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
+log = logging.getLogger("NetflixBot")
 
 SELF_REPO = "Afrsto/Netflix-For-Free"
 SELF_FILE_PATH = "bot.py"
