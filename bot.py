@@ -1317,8 +1317,8 @@ async def _build_main_embed() -> discord.Embed:
 
     description = (
         f"🍪 **Alive cookies** — `{total}`\n"
-        f"💎 **2160p Premium:** `{premium_count}`   "
-        f"🎬  **1080p Standard:** `{standard_count}`   "
+        f"💎 **4K Premium:** `{premium_count}`   "
+        f"🎬 **1080p Standard:** `{standard_count}`   "
         f"📺 **720p Basic:** `{basic_count}`\n"
         f"🏷️ **Version:** `{BOT_VERSION}`    •    🟢 **Status:** Online\n"
         f"\n"
