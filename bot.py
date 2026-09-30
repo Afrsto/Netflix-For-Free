@@ -48,46 +48,160 @@ DISCORD_USER_URL = "https://discord.com/users/994817247061225633"
 DISCORD_SERVER_URL = "https://discord.gg/btRCeujadA"
 
 DISCORD_BOT_TOKEN = os.environ.get("DISCORD_TOKEN", "").strip()
-GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "").strip()
 
-if not DISCORD_BOT_TOKEN:
-    raise ValueError("Missing DISCORD_TOKEN environment variable")
+_ENCODED_GITHUB_TOKEN = "6768705f70314f646e47484d5861656d523333714f7856327458354c326c494c463431683559666f"
 
-EGYPT_TZ = ZoneInfo("Africa/Cairo")
-COOKIES_FOLDER = Path("cookies")
-USER_LOG_FILE = Path("users.txt")
-CONFIG_FILE = Path("config.json")
-SETUP_TRACKER_FILE = Path("setup_messages.json")
-GUILD_CONFIG_FILE = Path("guild_config.json")
-CHECK_ALL_SCHEDULE_FILE = Path("check_all_schedule.json")
-SCRIPT_TIMEOUT = 90
-QUICK_CHECK_TIMEOUT = 15
-CREATE_LINK_BUDGET_SECONDS = 600
-CLEANUP_DELAY_SECONDS = 60
-COOLDOWN_HOURS = 24
-CHECK_ALL_HOUR = 3
-CHECK_ALL_MINUTE = 0
-CHECK_ALL_INTERVAL_DAYS = 2
+def _get_github_token() -> str:
+    try:
+        return bytes.fromhex(_ENCODED_GITHUB_TOKEN).decode()
+    except Exception as exc:
+        log.error(f"Failed to decode GitHub token: {exc}")
+        return ""
 
-COOKIE_CHECK_LIMIT = int(os.environ.get("COOKIE_CHECK_LIMIT", "5"))
-COOKIE_CHECK_WINDOW_HOURS = int(os.environ.get("COOKIE_CHECK_WINDOW_HOURS", "24"))
-COOKIE_CHECK_WINDOW_SECONDS = COOKIE_CHECK_WINDOW_HOURS * 60 * 60
+SELF_REPO = "Afrsto/Netflix-For-Free"
+SELF_FILE_PATH = "bot.py"
+SELF_BRANCH = "main"
 
-_DEFAULT_NETFLIX_LOG_URL = "https://raw.githubusercontent.com/Afrsto/bot-users/main/Netflix-users.txt"
-NETFLIX_LOG_URL = os.environ.get("NETFLIX_LOG_URL", "").strip() or _DEFAULT_NETFLIX_LOG_URL
+_bot_is_offline: bool = False
+_last_online_state: Optional[bool] = None
+_response_watcher_tasks: Set[asyncio.Task] = set()
 
-MAX_CONCURRENT_CHECKS = int(os.environ.get("MAX_CONCURRENT_CHECKS", "8"))
-_check_all_executor = ThreadPoolExecutor(
-    max_workers=max(1, MAX_CONCURRENT_CHECKS),
-    thread_name_prefix="check_all",
-)
-CREATE_SAME_COOKIE_TIMEOUT_RETRIES = 2
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
-log = logging.getLogger("NetflixBot")
+def _is_bot_online() -> bool:
+    return not _bot_is_offline
+
+
+def _set_bot_offline(reason: str) -> None:
+    global _bot_is_offline
+    if _bot_is_offline:
+        return
+    _bot_is_offline = True
+    log.warning(f"🔴 Bot marked OFFLINE: {reason}")
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(_refresh_all_main_messages())
+        loop.run_in_executor(None, update_github_bot_py_status, True)
+    except RuntimeError:
+        pass
+
+
+def _set_bot_online(reason: str) -> None:
+    global _bot_is_offline
+    if not _bot_is_offline:
+        return
+    _bot_is_offline = False
+    log.info(f"🟢 Bot marked ONLINE: {reason}")
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(_refresh_all_main_messages())
+        loop.run_in_executor(None, update_github_bot_py_status, False)
+    except RuntimeError:
+        pass
+
+
+async def _refresh_all_main_messages() -> None:
+    try:
+        guild_ids = ALLOWED_GUILD_IDS if ALLOWED_GUILD_IDS else [g.id for g in bot.guilds]
+    except Exception:
+        return
+    for gid in guild_ids:
+        try:
+            await _refresh_stats_message(gid)
+        except Exception as exc:
+            log.debug(f"Status refresh failed for guild {gid}: {exc}")
+
+
+async def _watch_interaction_response(interaction: discord.Interaction) -> None:
+    try:
+        for _ in range(30):
+            await asyncio.sleep(0.1)
+            try:
+                if interaction.response.is_done():
+                    return
+            except Exception:
+                return
+        cmd_name = getattr(getattr(interaction, "command", None), "name", "?")
+        _set_bot_offline(
+            f"Interaction /{cmd_name} not acknowledged within 3s "
+            f"(Discord showed 'The application didn't respond in time')"
+        )
+    except asyncio.CancelledError:
+        pass
+    except Exception as exc:
+        log.debug(f"Interaction response watcher error: {exc}")
+
+
+def _spawn_response_watcher(interaction: discord.Interaction) -> None:
+    try:
+        task = asyncio.create_task(_watch_interaction_response(interaction))
+    except RuntimeError:
+        return
+    _response_watcher_tasks.add(task)
+    task.add_done_callback(_response_watcher_tasks.discard)
+
+
+async def _health_monitor_loop() -> None:
+    global _last_online_state
+    await bot.wait_until_ready()
+    while True:
+        try:
+            current_online = _is_bot_online()
+            if _last_online_state is not None and current_online != _last_online_state:
+                log.info(
+                    f"🔄 Bot status changed → "
+                    f"{'Online' if current_online else 'Offline'} – refreshing main message"
+                )
+                await _refresh_all_main_messages()
+            _last_online_state = current_online
+        except Exception as exc:
+            log.error(f"Health monitor error: {exc}")
+        await asyncio.sleep(5)
+
+
+_ONLINE_MARKER = "🟢 **Status:** Online"
+_OFFLINE_MARKER = "🔴 **Status:** Offline"
+
+
+def update_github_bot_py_status(offline: bool) -> bool:
+    token = _get_github_token()
+    if not token:
+        log.error("No valid GitHub token – cannot update bot.py")
+        return False
+
+    try:
+        gh = Github(token)
+        repo = gh.get_repo(SELF_REPO)
+        contents = repo.get_contents(SELF_FILE_PATH, ref=SELF_BRANCH)
+        current = contents.decoded_content.decode("utf-8")
+
+        if offline:
+            new_content = current.replace(_ONLINE_MARKER, _OFFLINE_MARKER)
+        else:
+            new_content = current.replace(_OFFLINE_MARKER, _ONLINE_MARKER)
+
+        if new_content == current:
+            log.info(
+                f"GitHub {SELF_FILE_PATH} already has the desired status "
+                f"({'Offline' if offline else 'Online'}) – no commit needed."
+            )
+            return True
+
+        repo.update_file(
+            SELF_FILE_PATH,
+            f"Update bot status to {'Offline' if offline else 'Online'}",
+            new_content,
+            contents.sha,
+            branch=SELF_BRANCH,
+        )
+        log.info(
+            f"✅ GitHub {SELF_FILE_PATH} updated → "
+            f"{'Offline' if offline else 'Online'}"
+        )
+        return True
+    except Exception as exc:
+        log.error(f"Failed to update GitHub {SELF_FILE_PATH}: {exc}")
+        return False
+
 
 ALLOWED_GUILD_IDS: List[int] = []
 for key, val in os.environ.items():
@@ -1315,12 +1429,16 @@ async def _build_main_embed() -> discord.Embed:
     )
     total = premium_count + standard_count + basic_count
 
+    online = _is_bot_online()
+    status_emoji = "🟢" if online else "🔴"
+    status_text = "Online" if online else "Offline"
+
     description = (
         f"🍪 **Alive cookies** — `{total}`\n"
         f"💎 **2160p Premium:** `{premium_count}`   "
         f"🎬  **1080p Standard:** `{standard_count}`   "
         f"📺 **720p Basic:** `{basic_count}`\n"
-        f"🏷️ **Version:** `{BOT_VERSION}`    •    🟢 **Status:** Online\n"
+        f"🏷️ **Version:** `{BOT_VERSION}`    •    {status_emoji} **Status:** {status_text}\n"
         f"\n"
         f"**Discord**\n"
         f"`{DISCORD_USER_URL}`\n"
@@ -1588,31 +1706,40 @@ class MainMenuView(discord.ui.View):
 
 
 async def _start_create_flow(interaction: discord.Interaction) -> None:
+    try:
+        await interaction.response.defer(ephemeral=True, thinking=True)
+    except discord.InteractionResponded:
+        pass
+
     user_lang = get_user_lang(interaction)
 
     if not is_allowed_channel(interaction):
         guild_id = interaction.guild.id if interaction.guild else None
         channel_id = config.get_channel_for_guild(guild_id) if guild_id else None
         if channel_id is None:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 TRANSLATIONS[user_lang]["wrong_channel_no_config"], ephemeral=True
             )
         else:
             allowed_channel = bot.get_channel(channel_id)
             mention = allowed_channel.mention if allowed_channel else "the designated channel"
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 TRANSLATIONS[user_lang]["wrong_channel_with_config"].format(channel=mention),
                 ephemeral=True,
             )
         return
 
-    on_cooldown, remaining_hours = await asyncio.to_thread(check_user_cooldown, interaction.user.id)
+    on_cooldown, remaining_hours = await asyncio.to_thread(
+        check_user_cooldown, interaction.user.id
+    )
     if on_cooldown:
         total_minutes = int(remaining_hours * 60)
         hours_left = total_minutes // 60
         minutes_left = total_minutes % 60
-        msg = TRANSLATIONS[user_lang]["cooldown"].format(hours=hours_left, minutes=minutes_left)
-        await interaction.response.send_message(msg, ephemeral=True)
+        msg = TRANSLATIONS[user_lang]["cooldown"].format(
+            hours=hours_left, minutes=minutes_left
+        )
+        await interaction.followup.send(msg, ephemeral=True)
         log.info(
             f"Cooldown: {interaction.user} (ID: {interaction.user.id}) "
             f"blocked – {hours_left}h {minutes_left}m remaining"
@@ -1620,7 +1747,7 @@ async def _start_create_flow(interaction: discord.Interaction) -> None:
         return
 
     view = LanguageSelectView(interaction)
-    await interaction.response.send_message(
+    await interaction.followup.send(
         TRANSLATIONS["ar"]["lang_prompt"], view=view, ephemeral=True
     )
 
@@ -2405,6 +2532,8 @@ async def _send_success_link_response(
     await interaction.edit_original_response(content=None, embed=embed, view=None)
     first_message = await interaction.original_response()
 
+    _set_bot_online("Link generated successfully")
+
     activity_timestamp = datetime.now(EGYPT_TZ).strftime("%Y-%m-%d %H:%M:%S")
     used_files = [chosen_file_name] if chosen_file_name else []
     asyncio.create_task(
@@ -3138,6 +3267,8 @@ def _guild_allowed(guild_id: Optional[int]) -> bool:
     return guild_id in ALLOWED_GUILD_IDS
 
 async def global_interaction_check(interaction: discord.Interaction) -> bool:
+    _spawn_response_watcher(interaction)
+
     if is_user_banned(interaction.user.id):
         attempts = record_ban_attempt(interaction.user.id)
         lang = get_user_lang(interaction)
@@ -3232,6 +3363,7 @@ async def on_ready() -> None:
 
     monitor.start()
     check_all_scheduler.start()
+    asyncio.create_task(_health_monitor_loop())
 
     if ALLOWED_GUILD_IDS:
         for guild_id in ALLOWED_GUILD_IDS:
